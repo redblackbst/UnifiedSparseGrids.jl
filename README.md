@@ -1,5 +1,7 @@
 # UnifiedSparseGrids.jl
 
+[![Documentation](https://github.com/redblackbst/UnifiedSparseGrids.jl/actions/workflows/documentation.yml/badge.svg)](https://github.com/redblackbst/UnifiedSparseGrids.jl.jl/actions/workflows/documentation.yml) [![Docs: dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://redblackbst.github.io/UnifiedSparseGrids/dev/) [![Docs: stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://redblackbst.github.io/UnifiedSparseGrids/stable/) [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 UnifiedSparseGrids.jl is a Julia package for **regular sparse-grid data structures, transforms, and matrix-free tensor operators** built around
 
 - nested 1D **axis families**,
@@ -83,21 +85,18 @@ first(it_rec), first(it_sub)
 
 ## Examples
 
-See the `examples/` directory and the documentation tutorials:
+See the [`examples/`](examples/) directory and the documentation tutorials:
 
-- `balder_zenger_1996_helmholtz.jl`: Hierarchical-hat discretization for a Helmholtz-type operator with matrix-free line operators.
 - `gradinaru_2007_tdse.jl`: Strang splitting for the time-dependent Schrödinger equation using sparse-grid Fourier transforms.
 - `shen_yu_2010_sec4.jl`: Sparse spectral Galerkin solve for a high-dimensional elliptic problem using composed tensor operators.
+- `balder_zenger_1996_helmholtz.jl`: Hierarchical-hat discretization for a Helmholtz-type operator with matrix-free line operators.
 
 ## Documentation
 
-When GitHub Pages is enabled, the documentation will be published at:
-
-- stable: `https://redblackbst.github.io/UnifiedSparseGrids.jl/stable/`
-- dev: `https://redblackbst.github.io/UnifiedSparseGrids.jl/dev/`
-
-The documentation source and build configuration live under `docs/`.
+- [Development documentation](https://redblackbst.github.io/UnifiedSparseGrids.jl/dev/)
+- [Stable documentation](https://redblackbst.github.io/UnifiedSparseGrids.jl/stable/) (published after the first tagged release)
+- Documentation source and build configuration: [`docs/`](docs/)
 
 ## License
 
-MIT. See `LICENSE`.
+Distributed under the [MIT License](LICENSE).
