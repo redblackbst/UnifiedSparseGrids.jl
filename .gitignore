@@ -1,0 +1,16 @@
+.vscode
+
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+Manifest.toml
+
+/test/themes/dev/
+/test/quietly-logs/
+/docs/dev/
+/docs/build-pdf/
+/docs/site/
+/docs/src/release-notes.md
+
+# Documenter output
+docs/build/
