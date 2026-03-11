@@ -2,13 +2,13 @@
 
 [![Documentation](https://github.com/redblackbst/UnifiedSparseGrids.jl/actions/workflows/documentation.yml/badge.svg)](https://github.com/redblackbst/UnifiedSparseGrids.jl.jl/actions/workflows/documentation.yml) [![Docs: dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://redblackbst.github.io/UnifiedSparseGrids/dev/) [![Docs: stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://redblackbst.github.io/UnifiedSparseGrids/stable/) [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-UnifiedSparseGrids.jl is a Julia package for **regular sparse-grid data structures, transforms, and matrix-free tensor operators** built around
+UnifiedSparseGrids.jl is a Julia package for **regular sparse-grid data structures, transforms, matrix-free tensor operators, and dimension-adaptive sparse quadrature** built around
 
 - nested 1D **axis families**,
 - downward-closed **refinement-index sets** (notably Smolyak, weighted Smolyak, and full tensor), and
 - explicit coefficient layouts with deterministic traversal.
 
-It is aimed at interpolation / approximation workflows as well as sparse-grid Galerkin experiments where you want direct control over layouts, transforms, basis changes, and matrix-free operator application.
+It is aimed at interpolation / approximation workflows, adaptive quadrature, and sparse-grid Galerkin experiments where you want direct control over layouts, transforms, basis changes, tensor operators, and anisotropic admissibility envelopes.
 
 ## Highlights
 
@@ -30,6 +30,7 @@ It is aimed at interpolation / approximation workflows as well as sparse-grid Ga
   - use sparse-grid-safe up/down splitting when a 1D operator needs triangular decomposition.
 - **Evaluation and cross-grid transfer tools**: `evaluate`, `plan_evaluate`, `restrict!`, `embed!`.
 - **Thread-aware cyclic sweep engine** with reusable plans and allocation-aware kernels.
+- **Dimension-adaptive sparse quadrature** on downward-closed envelopes, with nested and non-nested 1D families and slow-growth rules such as pseudo-Gauss and weighted Leja.
 
 ## Figures
 
@@ -95,6 +96,7 @@ See the [`examples/`](examples/) directory and the documentation tutorials:
 
 - [Development documentation](https://redblackbst.github.io/UnifiedSparseGrids.jl/dev/)
 - [Stable documentation](https://redblackbst.github.io/UnifiedSparseGrids.jl/stable/) (published after the first tagged release)
+- Manual pages cover layouts, tensor sweeps, evaluation, adaptive quadrature, and Galerkin tools.
 - Documentation source and build configuration: [`docs/`](docs/)
 
 ## License

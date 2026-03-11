@@ -27,6 +27,7 @@ makedocs(
             "Layouts and iteration" => joinpath("manual", "layouts.md"),
             "Unidirectional principle" => joinpath("manual", "unidirectional_principle.md"),
             "Evaluation" => joinpath("manual", "evaluation.md"),
+            "Quadrature" => joinpath("manual", "quadrature.md"),
             "Galerkin tools" => joinpath("manual", "galerkin.md"),
         ],
         "Tutorials" => [

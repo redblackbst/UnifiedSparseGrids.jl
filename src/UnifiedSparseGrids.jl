@@ -6,6 +6,7 @@ using BandedMatrices
 using ClassicalOrthogonalPolynomials
 using LinearOperators
 using FastTransforms
+using DataStructures
 using Base.Threads
 
 export AbstractMeasure,
@@ -53,6 +54,20 @@ export AbstractLayout, RecursiveLayout, SubspaceLayout,
 
 export CombinationSubproblem, each_combination_subproblem
 
+# Adaptive quadrature
+export AbstractQuadratureFamily, AbstractNestedQuadratureFamily,
+       AbstractQuadraturePointFamily, AbstractNestedQuadraturePointFamily,
+       QuadratureRule,
+       ClenshawCurtisQuadrature, GaussLegendreQuadrature, GaussLaguerreQuadrature, GaussHermiteQuadrature,
+       WeightedLejaPoints, WeightedLejaQuadrature, PseudoGaussQuadrature,
+       MappedGaussianQuadrature, IdentityMap, ReciprocalExpMap,
+       QuadratureFamily,
+       qrule, qdiffrule, qdegree, qmeasure,
+       qsize, qpoints, qweights,
+       AdaptiveQuadratureState,
+       delta_contribution,
+       integrate_adaptive
+
 # 1D basis-change kernels
 export dirichlet_to_legendre!, legendre_to_dirichlet!, legendre_dirichlet_rhs!
 
@@ -91,6 +106,7 @@ include("transforms.jl")
 include("unidirectional.jl")
 include("crossgrid.jl")
 include("evaluation.jl")
+include("quadrature.jl")
 include("galerkin.jl")
 
 end # module UnifiedSparseGrids
