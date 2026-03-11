@@ -1,12 +1,12 @@
 # UnifiedSparseGrids.jl
 
-UnifiedSparseGrids.jl is a Julia package for **regular sparse-grid data structures, transforms, matrix-free tensor operators, and dimension-adaptive sparse quadrature** built around
+UnifiedSparseGrids.jl is a Julia package for **regular sparse grid data structures, transforms, matrix-free tensor operators, and dimension-adaptive sparse quadrature** built around
 
 - nested 1D **axis families**,
 - downward-closed **refinement-index sets** such as Smolyak, weighted Smolyak, and full tensor, and
-- explicit coefficient layouts with deterministic sparse-grid traversal.
+- explicit coefficient layouts with deterministic sparse grid traversal.
 
-The package is designed for interpolation / approximation workflows, adaptive quadrature, and sparse-grid Galerkin experiments where you want direct control over layouts, transforms, basis changes, tensor operators, and anisotropic admissibility envelopes.
+The package is designed for interpolation / approximation workflows, adaptive quadrature, and sparse grid Galerkin experiments where you want direct control over layouts, transforms, basis changes, tensor operators, and anisotropic admissibility envelopes.
 
 ## Installation
 
@@ -40,7 +40,7 @@ grid = SparseGrid(SparseGridSpec(axes, I))
 @show length(grid)
 ```
 
-Sample a function on sparse-grid points (ordered consistently with `traverse(grid)`):
+Sample a function on sparse grid points (ordered consistently with `traverse(grid)`):
 
 ```julia
 vals = evaluate(grid) do x
@@ -76,16 +76,16 @@ Active directions:
 - [SG++](https://github.com/SGpp/SGpp): sparse grids toolbox
 - [Tasmanian](https://github.com/ORNL/TASMANIAN): sparse grids for UQ / interpolation
 - [ASGarD](https://github.com/project-asgard/asgard): adaptive sparse grid DG for high-dimensional PDEs
-- [SparseGridQuadrature.jl](https://github.com/eschnett/SparseGridQuadrature.jl): Julia sparse-grid quadrature
+- [SparseGridQuadrature.jl](https://github.com/eschnett/SparseGridQuadrature.jl): Julia sparse grid quadrature
 - [smolyax](https://github.com/JoWestermann/smolyax): Smolyak interpolation operator in JAX
 
 ## Where to start
 
 - Coefficient ordering and iteration: [Layouts and iteration](@ref)
 - Fast tensor-product sweeps (including nodal--modal transforms): [Unidirectional principle](@ref)
-- Evaluating sparse-grid coefficient vectors at point sets: [Evaluation](@ref)
+- Evaluating sparse grid coefficient vectors at point sets: [Evaluation](@ref)
 - Matrix-free Galerkin building blocks: [Galerkin tools](@ref)
-- Dimension-adaptive sparse quadrature: [Quadrature](@ref)
+- Dimension-adaptive sparse quadrature: [Adaptive quadrature](@ref)
 - End-to-end examples: see the *Tutorials* section in the navigation sidebar
 
 ```@contents

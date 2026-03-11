@@ -95,7 +95,7 @@ end
     end
 end
 
-@testset "Transform plan sharing and sparse-grid roundtrip" begin
+@testset "Transform plan sharing and sparse grid roundtrip" begin
     axes = (
         ChebyshevGaussLobattoNodes(LevelOrder()),
         ChebyshevGaussLobattoNodes(LevelOrder()),

@@ -181,7 +181,7 @@ end
     @test length(plans_fft) == 4
 end
 
-@testset "Heterogeneous-axis sparse-grid layout sanity" begin
+@testset "Heterogeneous-axis sparse grid layout sanity" begin
     axes = (
         ChebyshevGaussLobattoNodes(LevelOrder()),
         DyadicNodes(LevelOrder()),

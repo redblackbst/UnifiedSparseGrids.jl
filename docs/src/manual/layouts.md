@@ -15,7 +15,7 @@ UnifiedSparseGrids supports two layouts:
 
 Both layouts cover the **same set of sparse grid points**. They differ only by ordering.
 
-## Sparse-grid basics
+## Sparse grid structure
 
 For each physical dimension, we assume a nested sequence of 1D axis states
 

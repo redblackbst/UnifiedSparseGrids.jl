@@ -285,7 +285,7 @@ end
     @test isapprox(u_fast.data, u_naive.data; rtol=1e-12, atol=1e-12)
 end
 
-@testset "Full vs genuine sparse-grid transform/operator sanity" begin
+@testset "Full vs genuine sparse grid transform/operator sanity" begin
     rng = MersenneTwister(4)
     D = 2
     L = 3

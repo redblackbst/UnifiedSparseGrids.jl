@@ -1,4 +1,4 @@
-"""Sparse-grid Galerkin utilities.
+"""Sparse grid Galerkin utilities.
 
 This file contains two categories of building blocks:
 

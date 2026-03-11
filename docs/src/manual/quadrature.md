@@ -1,15 +1,15 @@
 # Adaptive quadrature
 
-`UnifiedSparseGrids.jl` provides a dimension-adaptive sparse-grid quadrature subsystem
+`UnifiedSparseGrids.jl` provides a dimension-adaptive sparse grid quadrature subsystem
 for genuine scalar callback integrals. The implementation follows the generalized
-sparse-grid viewpoint of Gerstner and Griebel (2003, *Computing* 71(1):65-87,
+sparse grid viewpoint of Gerstner and Griebel (2003, *Computing* 71(1):65-87,
 [doi:10.1007/s00607-003-0015-5](http://link.springer.com/10.1007/s00607-003-0015-5))
-and the dimension-adaptive sparse-grid construction summarized in the chapter
+and the dimension-adaptive sparse grid construction summarized in the chapter
 "Dimension-Adaptive Sparse Grid Quadrature" in Garcke (ed., 2014),
 *Sparse Grids and Applications - Munich 2012*
 ([doi:10.1007/978-3-319-04537-5](http://link.springer.com/10.1007/978-3-319-04537-5)).
 
-## Generalized sparse-grid quadrature
+## Generalized sparse grid quadrature
 
 Let
 
@@ -31,7 +31,7 @@ For a multi-index $r = (r_1, \ldots, r_D)$, the tensor-difference contribution i
 \Delta_r f = (\Delta_{r_1}^{(1)} \otimes \cdots \otimes \Delta_{r_D}^{(D)}) f.
 ```
 
-Given an admissible index set $I \subset \mathbb{N}_0^D$, the generalized sparse-grid
+Given an admissible index set $I \subset \mathbb{N}_0^D$, the generalized sparse grid
 quadrature formula is
 
 ```math
@@ -170,7 +170,7 @@ I(f) = \left(\int_{-1}^1 e^{-x^2} \, dx\right)^2 \left(\int_{-1}^1 \cos z \, dz\
 = \bigl(\sqrt{\pi}\,\operatorname{erf}(1)\bigr)^2 \cdot 2\sin(1),
 ```
 
-so the adaptive sparse-grid result is easy to sanity-check against a known target value:
+so the adaptive sparse grid result is easy to sanity-check against a known target value:
 
 ```text
 I_exact = 3.7546185280582427

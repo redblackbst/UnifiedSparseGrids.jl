@@ -1,5 +1,5 @@
 # ----------------------------------------------------------------------------
-# Sparse-grid specification + coefficient layouts
+# Sparse grid specification + coefficient layouts
 
 struct SparseGridSpec{D,AxesT,IndexT<:AbstractIndexSet{D}}
     axes::AxesT

@@ -30,7 +30,7 @@ Gradinaru uses Gaussian initial data (the example script follows the same choice
 
 ## Spatial discretization
 
-### Sparse-grid Fourier collocation
+### Sparse grid Fourier collocation
 
 The spatial discretization is Fourier collocation on a sparse grid:
 

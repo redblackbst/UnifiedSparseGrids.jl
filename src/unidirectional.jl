@@ -839,11 +839,6 @@ function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
     return apply_unidirectional!(u, grid, op, plan)
 end
 
-# ============================================================================
-# Sparse-grid matrix-vector products and explicit permutation sweeps
-#
-# This section was previously implemented in `matvec.jl` and is now merged here.
-
 
 # -----------------------------------------------------------------------------
 # 1D matrix line operators

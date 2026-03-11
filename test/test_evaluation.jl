@@ -69,7 +69,7 @@ end
     end
 end
 
-@testset "Basis-aware sparse-grid evaluation sanity" begin
+@testset "Basis-aware sparse grid evaluation sanity" begin
     Random.seed!(1)
     for D in 2:3
         L = 3

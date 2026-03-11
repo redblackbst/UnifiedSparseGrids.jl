@@ -1,6 +1,6 @@
 """1D transforms and hierarchization kernels.
 
-This file collects the 1D building blocks used by the unidirectional sparse-grid
+This file collects the 1D building blocks used by the unidirectional sparse grid
 engine:
 
 - plan-based nodal ↔ modal line transforms (FFT, DCT-I via FFTW r2r)

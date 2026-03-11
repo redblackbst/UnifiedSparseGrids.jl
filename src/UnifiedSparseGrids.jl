@@ -71,7 +71,7 @@ export AbstractQuadratureFamily, AbstractNestedQuadratureFamily,
 # 1D basis-change kernels
 export dirichlet_to_legendre!, legendre_to_dirichlet!, legendre_dirichlet_rhs!
 
-# Sparse-grid Galerkin utilities (general)
+# Sparse grid Galerkin utilities (general)
 export WeightedTensorTerm, TensorSumMatVec,
        as_linear_operator, jacobi_precond,
        discrete_l2_error,
