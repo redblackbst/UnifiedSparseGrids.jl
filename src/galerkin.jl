@@ -310,7 +310,7 @@ function HatStiffnessDiagLineOp(nodes::DyadicNodes{<:Any,EndpointMask{0x3}}, rma
         diags[lvl + 1] = d
     end
 
-    return HatStiffnessDiagLineOp{T}(diags)
+    return HatStiffnessDiagLineOp(diags)
 end
 
 HatStiffnessDiagLineOp(nodes::DyadicNodes{<:Any,EndpointMask{0x0}}, ::Int; kwargs...) =

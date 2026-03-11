@@ -66,8 +66,8 @@ lineops(op::CompositeLineOp) = op.ops
 
 Used to prune UpDown tensor expansions.
 """
-iszero(::AbstractLineOp) = false
-iszero(::ZeroLineOp) = true
+Base.iszero(::AbstractLineOp) = false
+Base.iszero(::ZeroLineOp) = true
 
 """Return `true` if this line operator is an identity map.
 """

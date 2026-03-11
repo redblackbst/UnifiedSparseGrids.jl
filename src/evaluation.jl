@@ -35,8 +35,11 @@ function TensorProductPoints(pts::NTuple{D,AbstractVector}) where {D}
     return TensorProductPoints(ptsT)
 end
 
-Base.length(P::TensorProductPoints{D}) where {D} = prod(ntuple(d -> length(P.pts[d]), Val(D)))
-npoints(P::TensorProductPoints, d::Integer) = length(P.pts[d])
+Base.size(P::TensorProductPoints{D}) where {D} = ntuple(d -> length(P.pts[d]), Val(D))
+Base.size(P::TensorProductPoints, d::Integer) = length(P.pts[d])
+Base.axes(P::TensorProductPoints{D}) where {D} = ntuple(d -> Base.OneTo(size(P, d)), Val(D))
+Base.length(P::TensorProductPoints) = prod(size(P))
+npoints(P::TensorProductPoints, d::Integer) = size(P, d)
 
 # -----------------------------------------------------------------------------
 # Basis helpers

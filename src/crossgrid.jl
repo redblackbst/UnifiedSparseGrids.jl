@@ -102,7 +102,7 @@ function TransferPlan(grid_small::SparseGrid{<:SparseGridSpec{D}},
     dim(grid_big) == D || throw(DimensionMismatch("grid dimension mismatch"))
     map = _subsequence_index_map(traverse(grid_small), traverse(grid_big);
                                  coord_map=coord_map, Ti=Ti)
-    return TransferPlan{Ti}(map)
+    return TransferPlan(map)
 end
 
 """Restrict values from a *covering* grid vector into a *subgrid* vector.

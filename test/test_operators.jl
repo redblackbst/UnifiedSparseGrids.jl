@@ -267,7 +267,7 @@ end
 
     function naive_apply!(u::OrientedCoeffs{D,ElT}, grid, op::TensorOp{D}, plan) where {D,ElT}
         buf = Vector{ElT}(undef, length(u.data))
-        dest = OrientedCoeffs{D,ElT}(buf, u.perm)
+        dest = OrientedCoeffs(buf, u.perm)
         src = u
         for _ in 1:D
             dest = apply_lastdim_cycled!(dest, src, grid, lineop(op, src.perm[end]), plan)

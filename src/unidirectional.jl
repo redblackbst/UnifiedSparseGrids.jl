@@ -12,11 +12,11 @@ struct OrientedCoeffs{D,T}
     perm::SVector{D,Int}
 end
 
-OrientedCoeffs(data::Vector{T}) where {T} = OrientedCoeffs{1,T}(data, SVector{1,Int}(1))
+OrientedCoeffs(data::Vector{T}) where {T} = OrientedCoeffs(data, SVector{1,Int}(1))
 
 function OrientedCoeffs{D}(data::Vector{T}) where {D,T}
     perm = SVector{D,Int}(ntuple(i -> i, D))
-    return OrientedCoeffs{D,T}(data, perm)
+    return OrientedCoeffs(data, perm)
 end
 
 """Cyclic shift of a dimension permutation: (p1,p2,...,pD) -> (pD,p1,...,p{D-1})."""
@@ -655,7 +655,7 @@ function apply_lastdim_cycled!(dest::OrientedCoeffs{D,ElT},
     end
 
     dest_perm = cycle_last_to_front(src.perm)
-    return OrientedCoeffs{D,ElT}(dest.data, dest_perm)
+    return OrientedCoeffs(dest.data, dest_perm)
 end
 
 """Convenience overload: build a temporary [`CyclicLayoutPlan`](@ref) and apply."""
@@ -701,7 +701,7 @@ function _cyclic_rotate_by!(dest::OrientedCoeffs{D,ElT},
                             k::Int,
                             plan::CyclicLayoutPlan{D,Ti,ElT}) where {D,Ti,ElT}
     kk = mod(k, D)
-    kk == 0 && (copyto!(dest.data, src.data); return OrientedCoeffs{D,ElT}(dest.data, src.perm))
+    kk == 0 && (copyto!(dest.data, src.data); return OrientedCoeffs(dest.data, src.perm))
 
     perm_dst = cycle_last_to_front(src.perm, kk)
     orient_src = get(plan.perm_to_orient, src.perm, 0)
@@ -732,7 +732,7 @@ function _cyclic_rotate_by!(dest::OrientedCoeffs{D,ElT},
         nxt = iterate(it_src, st)
     end
 
-    return OrientedCoeffs{D,ElT}(dest.data, perm_dst)
+    return OrientedCoeffs(dest.data, perm_dst)
 end
 
 function _cyclic_rotate_to!(dest::Vector{ElT},
@@ -747,8 +747,8 @@ function _cyclic_rotate_to!(dest::Vector{ElT},
     (osrc == 0 || odst == 0) && throw(ArgumentError("non-cyclic perm in _cyclic_rotate_to!"))
     Δ = mod(odst - osrc, D)
 
-    src_or = OrientedCoeffs{D,ElT}(src, perm_src)
-    dst_or = OrientedCoeffs{D,ElT}(dest, perm_src)
+    src_or = OrientedCoeffs(src, perm_src)
+    dst_or = OrientedCoeffs(dest, perm_src)
     _cyclic_rotate_by!(dst_or, src_or, grid, Δ, plan)
     return dest
 end
@@ -769,7 +769,7 @@ function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
                                plan::CyclicLayoutPlan{D,Ti,ElT}) where {D,Ti,ElT}
     # Reuse plan-owned ping-pong buffer (separate from per-line scratch).
     bufdata = plan.unidir_buf
-    buf = OrientedCoeffs{D,ElT}(bufdata, u.perm)
+    buf = OrientedCoeffs(bufdata, u.perm)
 
     src = u
     dest = buf
@@ -1454,7 +1454,7 @@ function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
     else
         _cyclic_rotate_to!(xbuf, u.data, grid, idperm, perm0, plan)
     end
-    x0 = OrientedCoeffs{D,ElT}(xbuf, perm0)
+    x0 = OrientedCoeffs(xbuf, perm0)
 
     # Terms only branch over dimensions that have *both* L and U nontrivial.
     split_dims_eff = (omit_dim == 0) ? op.split_dims : [d for d in op.split_dims if d != omit_dim]
@@ -1475,7 +1475,7 @@ function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
 
     for mask in UInt(0):(nterms - 1)
         copyto!(work_buf, x0.data)
-        w = OrientedCoeffs{D,ElT}(work_buf, perm0)
+        w = OrientedCoeffs(work_buf, perm0)
 
         ops1 = ntuple(d -> begin
             if d == omit_dim
