@@ -172,7 +172,8 @@ end
 function _permute_indexset(I::WeightedSmolyakIndexSet{D,Ti}, perm::SVector{D,Int}) where {D,Ti<:Integer}
     cap_p = SVector{D,Ti}(ntuple(i -> I.cap[perm[i]], D))
     weights_p = SVector{D,Ti}(ntuple(i -> I.weights[perm[i]], D))
-    return WeightedSmolyakIndexSet(Val(D), I.L, weights_p; cap=cap_p)
+    shift_p = SVector{D,Ti}(ntuple(i -> I.shift[perm[i]], D))
+    return WeightedSmolyakIndexSet(Val(D), I.L, weights_p; shift=shift_p, cap=cap_p)
 end
 
 function _permute_indexset(I::FullTensorIndexSet{D,Ti}, perm::SVector{D,Int}) where {D,Ti<:Integer}

@@ -75,24 +75,29 @@ raw"""Weighted Smolyak index set in refinement-index coordinates.
 Multi-indices satisfy
 
 ```math
-r \in \mathbb{N}_0^d,\qquad \sum_{j=1}^d \theta_j r_j \le L,\qquad r \le \mathrm{cap},
+r \in \mathbb{N}_0^d,\qquad r \le \mathrm{cap},\qquad
+\sum_{j=1}^d \theta_j (r_j - s_j)_+ \le L,
 ```
 
-with positive integer weights `\theta_j = weights[j]`.
+with positive integer weights `\theta_j = weights[j]` and effective-level shift
+`shift = (s_1, \dots, s_d)`. The default shift is zero, which recovers the
+usual weighted Smolyak set.
 """
 struct WeightedSmolyakIndexSet{D,Ti<:Integer} <: AbstractIndexSet{D}
     L::Ti
     weights::SVector{D,Ti}
+    shift::SVector{D,Ti}
     cap::SVector{D,Ti}
 
-    function WeightedSmolyakIndexSet(::Val{D}, L::Ti, weights; cap=nothing) where {D,Ti<:Integer}
+    function WeightedSmolyakIndexSet(::Val{D}, L::Ti, weights; shift=nothing, cap=nothing) where {D,Ti<:Integer}
         L < 0 && throw(ArgumentError("L must be ≥ 0, got $L"))
         weights_s = _cap_convert(Val(D), Ti, weights)
         any(w -> w <= 0, weights_s) && throw(ArgumentError("weights must be positive, got $weights_s"))
-        cap_default = SVector{D,Ti}(ntuple(j -> fld(L, weights_s[j]), D))
+        shift_s = shift === nothing ? SVector{D,Ti}(ntuple(_ -> zero(Ti), D)) : _cap_convert(Val(D), Ti, shift)
+        cap_default = SVector{D,Ti}(ntuple(j -> Ti(shift_s[j] + fld(L, weights_s[j])), D))
         cap_s = cap === nothing ? cap_default : _cap_convert(Val(D), Ti, cap)
         any(ci -> ci < 0, cap_s) && throw(ArgumentError("cap entries must be ≥ 0, got $cap_s"))
-        return new{D,Ti}(L, weights_s, cap_s)
+        return new{D,Ti}(L, weights_s, shift_s, cap_s)
     end
 end
 
@@ -105,7 +110,8 @@ function contains(I::WeightedSmolyakIndexSet{D}, r::SVector{D,<:Integer}) where 
     @inbounds for j in 1:D
         rj = Int(r[j])
         rj > I.cap[j] && return false
-        acc += Int(I.weights[j]) * rj
+        eff = max(0, rj - Int(I.shift[j]))
+        acc += Int(I.weights[j]) * eff
         acc > I.L && return false
     end
     return true

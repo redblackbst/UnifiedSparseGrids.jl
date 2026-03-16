@@ -87,4 +87,18 @@ end
     @test SVector(2, 2, 1) in I
     @test !(SVector(3, 2, 1) in I)
     @test !(SVector(5, 0, 0) in I)
+
+    J = WeightedSmolyakIndexSet(Val(4), 8, SVector(1, 2, 2, 2); shift=SVector(0, 1, 1, 1))
+    @test refinement_caps(J) == SVector(8, 5, 5, 5)
+    @test SVector(0, 1, 1, 1) in J
+    @test SVector(2, 1, 1, 1) in J
+    @test SVector(2, 2, 1, 1) in J
+    @test !(SVector(3, 3, 2, 1) in J)
+
+    perm = SVector(2, 3, 4, 1)
+    Jp = UnifiedSparseGrids._permute_indexset(J, perm)
+    r = SVector(2, 3, 1, 1)
+    rp = SVector(r[perm[1]], r[perm[2]], r[perm[3]], r[perm[4]])
+    @test contains(J, r) == contains(Jp, rp)
 end
+

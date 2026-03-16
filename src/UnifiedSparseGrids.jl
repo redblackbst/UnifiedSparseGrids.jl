@@ -47,6 +47,7 @@ export CrossGridPlan, TransferPlan, subgrid_index_map,
 
 export AbstractLayout, RecursiveLayout, SubspaceLayout,
        recursive_to_subspace, subspace_to_recursive,
+       recursive_to_subspace!, subspace_to_recursive!,
        SubspaceBlock, each_subspace_block,
        traverse,
        plot_subspace_layout, plot_combination_technique,

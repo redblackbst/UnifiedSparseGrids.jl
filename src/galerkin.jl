@@ -73,6 +73,28 @@ function LinearAlgebra.mul!(y::AbstractVector{ElT}, A::TensorSumMatVec{D,ElT}, x
     return _mul_add!(y, A, x, αT)
 end
 
+Base.size(A::TensorSumMatVec) = (length(A.grid), length(A.grid))
+Base.eltype(::Type{<:TensorSumMatVec{D,ElT}}) where {D,ElT} = ElT
+Base.eltype(A::TensorSumMatVec{D,ElT}) where {D,ElT} = ElT
+
+function LinearAlgebra.dot(x::AbstractVector, A::TensorSumMatVec{D,ElT}, y::AbstractVector) where {D,ElT}
+    n = length(A.grid)
+    length(x) == n || throw(DimensionMismatch("x has length $(length(x)), expected $n"))
+    length(y) == n || throw(DimensionMismatch("y has length $(length(y)), expected $n"))
+    isempty(x) && return zero(dot(zero(eltype(x)), zero(ElT), zero(eltype(y))))
+    isempty(A.terms) && return zero(dot(zero(eltype(x)), zero(ElT), zero(eltype(y))))
+
+    Tsum = typeof(A.terms[1].weight * dot(first(x), zero(ElT), first(y)))
+    s = zero(Tsum)
+    @inbounds for term in A.terms
+        copyto!(A.work, y)
+        u = OrientedCoeffs{D}(A.work)
+        apply_unidirectional!(u, A.grid, term.op, A.plan)
+        s += term.weight * dot(x, A.work)
+    end
+    return s
+end
+
 """Wrap a `TensorSumMatVec` as a `LinearOperators.LinearOperator`.
 
 The returned operator uses the 5-argument `mul!` protocol:

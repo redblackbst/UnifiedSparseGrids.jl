@@ -204,6 +204,8 @@ struct SubspaceLayoutIterator{D}
     extents::Vector{SVector{D,Int}}
     lookup::Dict{SVector{D,Int},Int}
     totalsize_by_refinement::NTuple{D,Vector{Int}}
+    rec_to_sub::Vector{Int}
+    sub_to_rec::Vector{Int}
     total_length::Int
 end
 
@@ -352,40 +354,44 @@ end
 # ----------------------------------------------------------------------------
 # Layout transformations: recursive <-> subspace
 
+function recursive_to_subspace!(dest::AbstractVector, src::AbstractVector, it::SubspaceLayoutIterator)
+    length(src) == length(it) ||
+        throw(DimensionMismatch("expected source length $(length(it)), got $(length(src))"))
+    length(dest) == length(it) ||
+        throw(DimensionMismatch("expected destination length $(length(it)), got $(length(dest))"))
+
+    @inbounds for i in eachindex(src)
+        dest[it.rec_to_sub[i]] = src[i]
+    end
+    return dest
+end
+
+function subspace_to_recursive!(dest::AbstractVector, src::AbstractVector, it::SubspaceLayoutIterator)
+    length(src) == length(it) ||
+        throw(DimensionMismatch("expected source length $(length(it)), got $(length(src))"))
+    length(dest) == length(it) ||
+        throw(DimensionMismatch("expected destination length $(length(it)), got $(length(dest))"))
+
+    @inbounds for i in eachindex(src)
+        dest[it.sub_to_rec[i]] = src[i]
+    end
+    return dest
+end
+
 function recursive_to_subspace(grid::SparseGrid, coeffs::AbstractVector)
     length(coeffs) == length(grid) ||
         throw(DimensionMismatch("expected length $(length(grid)), got $(length(coeffs))"))
-
-    it_sub = traverse(grid; layout=SubspaceLayout())
-    it_sub.total_length == length(grid) ||
-        error("internal error: subspace plan length $(it_sub.total_length) != grid length $(length(grid))")
-
+    it = traverse(grid; layout=SubspaceLayout())
     out = similar(coeffs)
-    i = 1
-    for coords in traverse(grid; layout=RecursiveLayout())
-        dst = _subspace_linear_index(it_sub, coords)
-        @inbounds out[dst] = coeffs[i]
-        i += 1
-    end
-    return out
+    return recursive_to_subspace!(out, coeffs, it)
 end
 
 function subspace_to_recursive(grid::SparseGrid, coeffs::AbstractVector)
     length(coeffs) == length(grid) ||
         throw(DimensionMismatch("expected length $(length(grid)), got $(length(coeffs))"))
-
-    it_sub = traverse(grid; layout=SubspaceLayout())
-    it_sub.total_length == length(grid) ||
-        error("internal error: subspace plan length $(it_sub.total_length) != grid length $(length(grid))")
-
+    it = traverse(grid; layout=SubspaceLayout())
     out = similar(coeffs)
-    i = 1
-    for coords in traverse(grid; layout=RecursiveLayout())
-        src = _subspace_linear_index(it_sub, coords)
-        @inbounds out[i] = coeffs[src]
-        i += 1
-    end
-    return out
+    return subspace_to_recursive!(out, coeffs, it)
 end
 
 """Plot the 2D subspace layout (requires `using Plots` to activate the extension)."""
@@ -613,5 +619,17 @@ function traverse(::SubspaceLayout, spec::SparseGridSpec{D}) where {D}
         lookup[subspaces[b]] = b
     end
     totalsize_by_refinement = _build_totalsize_by_refinement(spec.axes, caps)
-    return SubspaceLayoutIterator{D}(subspaces, offsets, extents, lookup, totalsize_by_refinement, total_length)
+    it0 = SubspaceLayoutIterator{D}(subspaces, offsets, extents, lookup,
+                                    totalsize_by_refinement, Int[], Int[], total_length)
+    rec_to_sub = Vector{Int}(undef, total_length)
+    sub_to_rec = Vector{Int}(undef, total_length)
+    i = 1
+    for coords in traverse(RecursiveLayout(), spec)
+        j = _subspace_linear_index(it0, coords)
+        rec_to_sub[i] = j
+        sub_to_rec[j] = i
+        i += 1
+    end
+    return SubspaceLayoutIterator{D}(subspaces, offsets, extents, lookup,
+                                     totalsize_by_refinement, rec_to_sub, sub_to_rec, total_length)
 end
