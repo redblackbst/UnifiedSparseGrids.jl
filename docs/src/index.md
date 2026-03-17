@@ -100,6 +100,7 @@ Pages = [
     "examples/balder_zenger_1996_helmholtz.md",
     "advance/conventions.md",
     "advance/development.md",
+    "advance/multithreading.md",
 ]
 Depth = 2
 ```

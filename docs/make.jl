@@ -42,6 +42,7 @@ makedocs(
         "Advanced topics" => [
             "Conventions" => joinpath("advance", "conventions.md"),
             "Development" => joinpath("advance", "development.md"),
+            "Multi-threading" => joinpath("advance", "multithreading.md"),
         ],
     ],
 )

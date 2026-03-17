@@ -300,7 +300,7 @@ function _evaluate_backend!(y::AbstractVector,
     backend.m == SVector{D,Int}(ntuple(d -> length(P.pts[d]), Val(D))) ||
         throw(ArgumentError("point-set size mismatch with plan"))
 
-    w = backend.planW.work_buf
+    w = backend.planW.workspace.work_buf
     _scatter_zero!(w, x, backend.x_to_w)
 
     u = OrientedCoeffs{D}(w)

@@ -152,12 +152,12 @@ end
     for (axes, I) in cases
         grid = SparseGrid(SparseGridSpec(axes, I))
         plan = CyclicLayoutPlan(grid, Float64)
-        for layout in plan.layouts
+        for layout in plan.meta.layouts
             off_ref, cnt_ref, maxlen_ref, n_ref = scan_rowmeta(grid, layout.perm)
             @test Int(layout.maxlen) == maxlen_ref
             @test n_ref == length(grid)
             @test layout.first_offsets == off_ref
-            @test layout.first_counts == cnt_ref
+            @test vcat(diff(layout.first_offsets), n_ref + 1 - layout.first_offsets[end]) == cnt_ref
         end
     end
 end
@@ -173,11 +173,11 @@ end
     plan = CyclicLayoutPlan(grid, Float64)
     opf = LineTransform(Val(:forward))
 
-    plans_cgl_1 = UnifiedSparseGrids._get_lineplanvec!(plan.op_plan, opf, axes[1], 4, Float64)
-    plans_cgl_2 = UnifiedSparseGrids._get_lineplanvec!(plan.op_plan, opf, axes[2], 4, Float64)
+    plans_cgl_1 = UnifiedSparseGrids._get_lineplanvec!(plan.meta.lineplans, opf, axes[1], 4, Float64)
+    plans_cgl_2 = UnifiedSparseGrids._get_lineplanvec!(plan.meta.lineplans, opf, axes[2], 4, Float64)
     @test plans_cgl_1 === plans_cgl_2
 
-    plans_fft = UnifiedSparseGrids._get_lineplanvec!(plan.op_plan, opf, axes[3], 3, Float64)
+    plans_fft = UnifiedSparseGrids._get_lineplanvec!(plan.meta.lineplans, opf, axes[3], 3, Float64)
     @test length(plans_fft) == 4
 end
 

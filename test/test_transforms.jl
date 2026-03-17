@@ -105,12 +105,12 @@ end
     grid = SparseGrid(SparseGridSpec(axes, I))
     plan = CyclicLayoutPlan(grid, Float64)
 
-    pf = UnifiedSparseGrids._get_lineplanvec!(plan.op_plan, LineTransform(Val(:forward)), axes[1], 4, Float64)
-    pi = UnifiedSparseGrids._get_lineplanvec!(plan.op_plan, LineTransform(Val(:inverse)), axes[2], 4, Float64)
+    pf = UnifiedSparseGrids._get_lineplanvec!(plan.meta.lineplans, LineTransform(Val(:forward)), axes[1], 4, Float64)
+    pi = UnifiedSparseGrids._get_lineplanvec!(plan.meta.lineplans, LineTransform(Val(:inverse)), axes[2], 4, Float64)
     @test pf === pi
 
-    pcf = UnifiedSparseGrids._get_lineplanvec!(plan.op_plan, LineChebyshevLegendre(Val(:forward)), axes[1], 4, Float64)
-    pci = UnifiedSparseGrids._get_lineplanvec!(plan.op_plan, LineChebyshevLegendre(Val(:inverse)), axes[2], 4, Float64)
+    pcf = UnifiedSparseGrids._get_lineplanvec!(plan.meta.lineplans, LineChebyshevLegendre(Val(:forward)), axes[1], 4, Float64)
+    pci = UnifiedSparseGrids._get_lineplanvec!(plan.meta.lineplans, LineChebyshevLegendre(Val(:inverse)), axes[2], 4, Float64)
     @test pcf === pci
 
     rng = MersenneTwister(1)

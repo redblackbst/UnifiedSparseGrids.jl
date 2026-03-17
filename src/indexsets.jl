@@ -151,6 +151,9 @@ end
 
 refinement_caps(I::FullTensorIndexSet{D}) where {D} = SVector{D,Int}(Tuple(I.cap))
 
+Base.contains(I::AbstractIndexSet{D}, r::SVector{D,<:Integer}) where {D} = contains(I, r)
+Base.contains(I::AbstractIndexSet{D}, r::NTuple{D,<:Integer}) where {D} = contains(I, r)
+
 # Prefer Julia's standard membership API: `r ∈ I`.
 Base.in(r::SVector{D,<:Integer}, I::AbstractIndexSet{D}) where {D} = contains(I, r)
 Base.in(r::NTuple{D,<:Integer}, I::AbstractIndexSet{D}) where {D} = contains(I, r)

@@ -95,16 +95,13 @@ export OrientedCoeffs, cycle_last_to_front,
        compose,
        apply_lastdim_cycled!, apply_unidirectional!
 
-include("measures.jl")
-include("orders.jl")
-include("nodes.jl")
+include("axis.jl")
 include("basis.jl")
 include("indexsets.jl")
 include("layout.jl")
 include("combination.jl")
-include("operators.jl")
-include("transforms.jl")
 include("unidirectional.jl")
+include("transforms.jl")
 include("crossgrid.jl")
 include("evaluation.jl")
 include("quadrature.jl")

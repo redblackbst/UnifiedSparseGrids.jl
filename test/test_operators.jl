@@ -116,6 +116,16 @@ function nested_invertible_triangular_mats(rng::AbstractRNG, axis::AbstractAxisF
     return mats
 end
 
+function dense_tridiag_family(n::Integer, ::Type{T}) where {T<:Number}
+    A = zeros(T, n, n)
+    @inbounds for i in 1:n
+        A[i, i] = T(2) + T(i) / T(7)
+        i < n && (A[i, i + 1] = T(-1) / T(4))
+        i > 1 && (A[i, i - 1] = T(1) / T(2))
+    end
+    return A
+end
+
 function _fourier_dft_mat(N::Int)
     ω = exp(-2π * im / N)
     [ω^(k * n) for k in 0:(N - 1), n in 0:(N - 1)]
@@ -251,7 +261,73 @@ end
     lop2 = LineMatrixOp([[1.0 2.0; 3.0 4.0]])
     lop3 = LineDiagonalOp(diag_ones3)
     ud = UpDownTensorOp((lop1, lop2, lop3))
-    @test ud.split_dims == [2]
+    @test ud.split_mask == UInt64(0x2)
+end
+
+@testset "UpDown backend parity" begin
+    rng = MersenneTwister(5)
+    D = 3
+    L = 3
+    axes = ntuple(_ -> DyadicNodes(NaturalOrder()), D)
+    I = SmolyakIndexSet(Val(D), L; cap=SVector{D,Int}(ntuple(_ -> L, D)))
+    grid = SparseGrid(SparseGridSpec(axes, I))
+    plan = CyclicLayoutPlan(grid, Float64)
+    coords = collect(SVector{D,Int}, traverse(grid))
+    rmax = refinement_caps(I)
+
+    for omit_dim in (0, 1)
+        x = randn(rng, Float64, length(grid))
+
+        mats = ntuple(d -> nested_dense_mats(rng, axes[d], rmax[d], Float64), Val(D))
+        op_dense = UpDownTensorOp(ntuple(d -> LineMatrixOp(mats[d]), Val(D)); omit_dim=omit_dim)
+        u_dense_fiber = OrientedCoeffs{D}(copy(x))
+        u_dense_term = OrientedCoeffs{D}(copy(x))
+        apply_unidirectional!(u_dense_fiber, grid, op_dense, plan; parallel=:fiber)
+        apply_unidirectional!(u_dense_term, grid, op_dense, plan; parallel=:term)
+        @test isapprox(u_dense_term.data, u_dense_fiber.data; rtol=1e-12, atol=1e-12)
+
+        Amax_dense = ntuple(d -> mats[d][rmax[d] + 1], Val(D))
+        @test isapprox(u_dense_fiber.data, restricted_kron_matvec(coords, Amax_dense, x); rtol=1e-10, atol=1e-10)
+
+        op_banded = UpDownTensorOp(ntuple(_ -> LineBandedOp(dense_tridiag_family), Val(D)); omit_dim=omit_dim)
+        u_banded_fiber = OrientedCoeffs{D}(copy(x))
+        u_banded_term = OrientedCoeffs{D}(copy(x))
+        apply_unidirectional!(u_banded_fiber, grid, op_banded, plan; parallel=:fiber)
+        apply_unidirectional!(u_banded_term, grid, op_banded, plan; parallel=:term)
+        @test isapprox(u_banded_term.data, u_banded_fiber.data; rtol=1e-12, atol=1e-12)
+
+        Amax_banded = ntuple(d -> dense_tridiag_family(totalsize(axes[d], rmax[d]), Float64), Val(D))
+        @test isapprox(u_banded_fiber.data, restricted_kron_matvec(coords, Amax_banded, x); rtol=1e-10, atol=1e-10)
+    end
+end
+
+@testset "UpDown one-thread parity and term determinism" begin
+    rng = MersenneTwister(6)
+    D = 3
+    L = 3
+    axes = ntuple(_ -> DyadicNodes(NaturalOrder()), D)
+    I = SmolyakIndexSet(Val(D), L; cap=SVector{D,Int}(ntuple(_ -> L, D)))
+    grid = SparseGrid(SparseGridSpec(axes, I))
+    plan = CyclicLayoutPlan(grid, Float64)
+    rmax = refinement_caps(I)
+    mats = ntuple(d -> nested_dense_mats(rng, axes[d], rmax[d], Float64), Val(D))
+    op = UpDownTensorOp(ntuple(d -> LineMatrixOp(mats[d]), Val(D)); omit_dim=0)
+    x = randn(rng, Float64, length(grid))
+
+    u_auto = OrientedCoeffs{D}(copy(x))
+    u_fiber = OrientedCoeffs{D}(copy(x))
+    u_term = OrientedCoeffs{D}(copy(x))
+    apply_unidirectional!(u_auto, grid, op, plan; parallel=:auto, parallel_width=1)
+    apply_unidirectional!(u_fiber, grid, op, plan; parallel=:fiber, parallel_width=1)
+    apply_unidirectional!(u_term, grid, op, plan; parallel=:term, parallel_width=1)
+    @test u_auto.data == u_fiber.data
+    @test u_auto.data == u_term.data
+
+    u_term1 = OrientedCoeffs{D}(copy(x))
+    u_term2 = OrientedCoeffs{D}(copy(x))
+    apply_unidirectional!(u_term1, grid, op, plan; parallel=:term)
+    apply_unidirectional!(u_term2, grid, op, plan; parallel=:term)
+    @test u_term1.data == u_term2.data
 end
 
 @testset "Scheduling parity" begin

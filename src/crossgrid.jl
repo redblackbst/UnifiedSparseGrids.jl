@@ -187,7 +187,7 @@ function LinearAlgebra.mul!(y::AbstractVector{ElT},
     plan === nothing && (plan = CrossGridPlan(gridY, gridX, ElT))
     gridW = plan.gridW
 
-    w = plan.planW.work_buf
+    w = plan.planW.workspace.work_buf
 
     if plan.x_to_w === nothing
         length(w) == length(x) || throw(DimensionMismatch("plan/grid mismatch"))
