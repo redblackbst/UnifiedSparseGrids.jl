@@ -152,8 +152,10 @@ end
     for (axes, I) in cases
         grid = SparseGrid(SparseGridSpec(axes, I))
         plan = CyclicLayoutPlan(grid, Float64)
-        for layout in plan.meta.layouts
-            off_ref, cnt_ref, maxlen_ref, n_ref = scan_rowmeta(grid, layout.perm)
+        idperm = SVector{length(axes),Int}(ntuple(identity, Val(length(axes))))
+        for (orient, layout) in pairs(plan.meta.layouts)
+            perm = cycle_last_to_front(idperm, orient - 1)
+            off_ref, cnt_ref, maxlen_ref, n_ref = scan_rowmeta(grid, perm)
             @test Int(layout.maxlen) == maxlen_ref
             @test n_ref == length(grid)
             @test layout.first_offsets == off_ref

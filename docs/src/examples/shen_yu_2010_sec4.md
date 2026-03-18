@@ -160,8 +160,9 @@ In the Dirichlet Legendre basis used here:
 
 These are implemented by
 
-- `LineDiagonalOp` (stiffness),
-- `LineBandedOp` (mass).
+- `LineDiagonalOp` (stiffness), whose family function returns the diagonal
+  entries as a vector, and
+- `LineBandedOp` (mass), whose family function returns a `BandedMatrix`.
 
 The full $d$-dimensional operator is represented as a `TensorSumMatVec` of
 `WeightedTensorTerm`s, and applied without ever forming $M$ or $S$ explicitly.

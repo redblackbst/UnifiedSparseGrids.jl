@@ -81,7 +81,7 @@ LineTransform(::Val{:inverse}) = LineTransform{Val(:inverse)}()
 """
     struct LineChebyshevLegendre{Dir} <: AbstractLineOp
 
-Per-fiber Chebyshev–Legendre coefficient conversion.
+Per-fiber Chebyshev-Legendre coefficient conversion.
 """
 struct LineChebyshevLegendre{Dir} <: AbstractLineOp end
 
@@ -158,6 +158,10 @@ end
     struct LineDiagonalOp{F} <: AbstractLineOp
 
 Size-parameterized diagonal family acting on one fiber.
+
+The family function `f(n, T)` must return a vector-like container of diagonal
+entries of length `n`. Smaller refinement levels reuse prefix views `d[1:m]`,
+so the family must be prefix-compatible across `n`.
 """
 struct LineDiagonalOp{F} <: AbstractLineOp
     f::F
@@ -167,6 +171,15 @@ end
     struct LineBandedOp{Part,F} <: AbstractLineOp
 
 Size-parameterized banded family acting on one fiber.
+
+The family function `f(n, T)` must return a square
+`BandedMatrices.AbstractBandedMatrix` of size `n × n`; the recommended concrete
+return type is `BandedMatrix`. Smaller refinement levels reuse leading
+principal banded views, so the family must be prefix-compatible across `n`.
+
+When a banded family is algebraically lower- or upper-triangular, prefer
+`LineBandedOp(Val(:lower), f)` or `LineBandedOp(Val(:upper), f)` so
+[`UpDownTensorOp`](@ref) can avoid splitting that dimension.
 """
 struct LineBandedOp{Part,F} <: AbstractLineOp
     f::F
@@ -281,17 +294,6 @@ lineop_style(::Type{CompositeLineOp{Ops}}) where {Ops} =
 needs_plan(::Type{<:LineDiagonalOp}) = Val(true)
 needs_plan(::Type{<:LineBandedOp}) = Val(true)
 
-function apply!(dest::AbstractVector, ::ZeroLineOp, src::AbstractVector)
-    fill!(dest, zero(eltype(dest)))
-    return dest
-end
-
-function apply(op::ZeroLineOp, src::AbstractVector{T}) where {T}
-    dest = Vector{T}(undef, length(src))
-    fill!(dest, zero(T))
-    return dest
-end
-
 """
     AbstractTensorOp{D}
 
@@ -385,14 +387,13 @@ function InverseTransform(::Val{D}) where {D}
 end
 InverseTransform(D::Integer) = InverseTransform(Val(D))
 
-"""
-    updown(op)
+const _UPDOWN_ZERO = UInt8(0)
+const _UPDOWN_IDENTITY = UInt8(1)
+const _UPDOWN_LOWER_ONLY = UInt8(2)
+const _UPDOWN_UPPER_ONLY = UInt8(3)
+const _UPDOWN_SPLIT = UInt8(4)
 
-Split a line operator into additive lower and upper factors `(L, U)`.
-"""
-updown(::IdentityLineOp) = (IdentityLineOp(), ZeroLineOp())
-
-@inline function _split_updown_matrix(A::AbstractMatrix{T}) where {T}
+function _split_updown_matrix(A::AbstractMatrix{T}) where {T}
     L = Matrix{T}(A)
     U = Matrix{T}(A)
     n, m = size(A)
@@ -414,9 +415,9 @@ end
 function _split_updown_matrix(A::BandedMatrices.AbstractBandedMatrix{T}) where {T}
     n, m = size(A)
     n == m || throw(DimensionMismatch("expected square matrix, got $(n)×$(m)"))
-    l, u = BandedMatrices.bandwidths(A)
-    L = BandedMatrices.BandedMatrix{T}(undef, (n, n), (l, 0))
-    U = BandedMatrices.BandedMatrix{T}(undef, (n, n), (0, u))
+    l, u = bandwidths(A)
+    L = BandedMatrix{T}(undef, (n, n), (l, 0))
+    U = BandedMatrix{T}(undef, (n, n), (0, u))
     fill!(L, zero(T))
     fill!(U, zero(T))
     @inbounds for i in 1:n
@@ -430,6 +431,11 @@ function _split_updown_matrix(A::BandedMatrices.AbstractBandedMatrix{T}) where {
     return L, U
 end
 
+"""
+    updown(op)
+
+Split a line operator into additive lower and upper factors `(L, U)`.
+"""
 function updown(op::LineMatrixOp)
     isempty(op.mats) && throw(ArgumentError("cannot split an empty LineMatrixOp"))
     all_lower = true
@@ -455,6 +461,8 @@ function updown(op::LineMatrixOp)
     return LineMatrixOp(matsL), LineMatrixOp(matsU)
 end
 
+updown(::IdentityLineOp) = (IdentityLineOp(), ZeroLineOp())
+updown(::ZeroLineOp) = (ZeroLineOp(), ZeroLineOp())
 updown(op::LineDiagonalOp) = (op, ZeroLineOp())
 function updown(op::LineBandedOp{:full})
     return LineBandedOp(Val(:lower), op.f), LineBandedOp(Val(:upper), op.f)
@@ -471,16 +479,22 @@ struct UpDownTensorOp{D,OpsT<:NTuple{D,AbstractLineOp},LOpsT<:NTuple{D,AbstractL
     full::OpsT
     lower::LOpsT
     upper::UOpsT
+    mode::NTuple{D,UInt8}
     omit_dim::Int
     split_mask::UInt64
+    has_zero::Bool
 end
 
 """
-    UpDownTensorOp(ops; omit_dim=0)
+    UpDownTensorOp(ops; omit_dim=1)
 
 Construct an [`UpDownTensorOp`](@ref) by pre-splitting each dimension into lower and upper factors.
+
+`omit_dim == 0` keeps all split dimensions in the term expansion. `1 <= omit_dim <= D`
+omits that physical dimension from the split and instead applies the unsplit line operator in
+that dimension.
 """
-function UpDownTensorOp(ops::NTuple{D,AbstractLineOp}; omit_dim::Integer=0) where {D}
+function UpDownTensorOp(ops::NTuple{D,AbstractLineOp}; omit_dim::Integer=1) where {D}
     0 <= Int(omit_dim) <= D || throw(ArgumentError("omit_dim must satisfy 0 <= omit_dim <= $D"))
     D <= 64 || throw(ArgumentError("UpDownTensorOp currently supports D <= 64"))
 
@@ -489,11 +503,30 @@ function UpDownTensorOp(ops::NTuple{D,AbstractLineOp}; omit_dim::Integer=0) wher
     upper = ntuple(k -> parts[k][2], Val(D))
 
     split_mask = zero(UInt64)
-    @inbounds for d in 1:D
-        (!iszero(lower[d]) && !iszero(upper[d])) && (split_mask |= UInt64(1) << (d - 1))
-    end
+    has_zero = false
+    mode = ntuple(d -> begin
+        fd = ops[d]
+        L = lower[d]
+        U = upper[d]
+        if iszero(fd)
+            has_zero = true
+            _UPDOWN_ZERO
+        elseif isidentity(fd)
+            _UPDOWN_IDENTITY
+        elseif !iszero(L) && !iszero(U)
+            split_mask |= UInt64(1) << (d - 1)
+            _UPDOWN_SPLIT
+        elseif iszero(L) && iszero(U)
+            has_zero = true
+            _UPDOWN_ZERO
+        elseif iszero(U)
+            _UPDOWN_LOWER_ONLY
+        else
+            _UPDOWN_UPPER_ONLY
+        end
+    end, Val(D))
 
-    return UpDownTensorOp{D,typeof(ops),typeof(lower),typeof(upper)}(ops, lower, upper, Int(omit_dim), split_mask)
+    return UpDownTensorOp{D,typeof(ops),typeof(lower),typeof(upper)}(ops, lower, upper, mode, Int(omit_dim), split_mask, has_zero)
 end
 
 lineop(op::UpDownTensorOp{D}, d::Integer) where {D} = op.full[d]
@@ -539,11 +572,75 @@ function lineplan(op::AbstractLineOp, axis::AbstractUnivariateNodes, rmax::Integ
     return plans
 end
 
+"""
+    lineplan(op::LineDiagonalOp, axis::AbstractUnivariateNodes, rmax::Integer, ::Type{T}) where {T<:Number}
+
+Build a cached vector of diagonal-data prefixes for `LineDiagonalOp`. The
+family function `f(n, T)` must return a vector-like container of length `n`,
+and smaller levels reuse prefix views `d[1:m]`.
+"""
+function lineplan(op::LineDiagonalOp, axis::AbstractUnivariateNodes, rmax::Integer, ::Type{T}) where {T<:Number}
+    maxr = Int(rmax)
+    nmax = totalsize(axis, maxr)
+    dmax = op.f(nmax, T)
+    length(dmax) == nmax || throw(DimensionMismatch(
+        "LineDiagonalOp: f(n,T) length=$(length(dmax)) but totalsize(axis,rmax)=$nmax (note: caching ignores axis type)"))
+
+    p0 = @view dmax[1:totalsize(axis, 0)]
+    plans = Vector{typeof(p0)}(undef, maxr + 1)
+    plans[1] = p0
+    @inbounds for r in 1:maxr
+        n = totalsize(axis, r)
+        plans[r + 1] = @view dmax[1:n]
+    end
+    return plans
+end
+
+"""
+    lineplan(op::LineBandedOp, axis::AbstractUnivariateNodes, rmax::Integer, ::Type{T}) where {T<:Number}
+
+Build a cached vector of banded principal-prefix views for `LineBandedOp`. The
+family function `f(n, T)` must return a square
+`BandedMatrices.AbstractBandedMatrix` of size `n × n`, and smaller levels reuse
+leading principal banded views.
+"""
+function lineplan(op::LineBandedOp, axis::AbstractUnivariateNodes, rmax::Integer, ::Type{T}) where {T<:Number}
+    maxr = Int(rmax)
+    nmax = totalsize(axis, maxr)
+    Amax = op.f(nmax, T)
+    Amax isa BandedMatrices.AbstractBandedMatrix || throw(ArgumentError("LineBandedOp: f(n,T) must return a BandedMatrices.AbstractBandedMatrix (recommended: BandedMatrix), got $(typeof(A))"))
+    size(Amax, 1) == nmax || throw(DimensionMismatch(
+        "LineBandedOp: f(n,T) size=$(size(Amax)) but totalsize(axis,rmax)=$nmax (note: caching ignores axis type)"))
+    size(Amax, 2) == nmax || throw(DimensionMismatch(
+        "LineBandedOp: f(n,T) size=$(size(Amax)) but totalsize(axis,rmax)=$nmax (note: caching ignores axis type)"))
+
+    n0 = totalsize(axis, 0)
+    S0 = @view Amax[1:n0, 1:n0]
+    l0, u0 = bandwidths(S0)
+    p0 = BandedMatrices._BandedMatrix(BandedMatrices.bandeddata(S0), n0, l0, u0)
+
+    plans = Vector{typeof(p0)}(undef, maxr + 1)
+    plans[1] = p0
+    @inbounds for r in 1:maxr
+        n = totalsize(axis, r)
+        S = @view Amax[1:n, 1:n]
+        l, u = bandwidths(S)
+        plans[r + 1] = BandedMatrices._BandedMatrix(BandedMatrices.bandeddata(S), n, l, u)
+    end
+    return plans
+end
+
 @inline _lineplan_key(op::AbstractLineOp, axis::AbstractUnivariateNodes, ::Type{T}) where {T} =
     (plan_family(typeof(op)), typeof(axis), T)
 
 @inline _lineplan_key(::LineTransform, axis::AbstractUnivariateNodes, ::Type{T}) where {T<:Number} =
     (LineTransform, typeof(axis), _realpart_type(T), T)
+
+@inline _lineplan_key(op::LineDiagonalOp, ::AbstractUnivariateNodes, ::Type{T}) where {T} =
+    (typeof(op), T)
+
+@inline _lineplan_key(op::LineBandedOp{Part,F}, ::AbstractUnivariateNodes, ::Type{T}) where {Part,F,T} =
+    (LineBandedOp, F, T)
 
 function _get_lineplanvec!(op_plan::Dict{Tuple,AbstractVector},
                            op::AbstractLineOp,
@@ -564,60 +661,6 @@ function _get_lineplanvec!(op_plan::Dict{Tuple,AbstractVector},
 
     plans = lineplan(op, axis, rmax, T)
     op_plan[key] = plans
-    return plans
-end
-
-@inline function _mat_for_level(op::LineMatrixOp, ℓ::Integer)
-    @inbounds return op.mats[ℓ + 1]
-end
-
-# Cache keys for line plans.
-@inline _lineplan_key(op::LineDiagonalOp, ::AbstractUnivariateNodes, ::Type{T}) where {T} =
-    (typeof(op), T)
-@inline _lineplan_key(op::LineBandedOp{Part,F}, ::AbstractUnivariateNodes, ::Type{T}) where {Part,F,T} =
-    (LineBandedOp, F, T)
-
-function lineplan(op::LineDiagonalOp, axis::AbstractUnivariateNodes, rmax::Integer, ::Type{T}) where {T<:Number}
-    maxr = Int(rmax)
-    nmax = totalsize(axis, maxr)
-    dmax = op.f(nmax, T)
-    length(dmax) == nmax || throw(DimensionMismatch(
-        "LineDiagonalOp: f(n,T) length=$(length(dmax)) but totalsize(axis,rmax)=$nmax (note: caching ignores axis type)"))
-
-    plans = Vector{Any}(undef, maxr + 1)
-    @inbounds for r in 0:maxr
-        n = totalsize(axis, r)
-        plans[r + 1] = @view dmax[1:n]
-    end
-    return plans
-end
-
-function lineplan(op::LineBandedOp, axis::AbstractUnivariateNodes, rmax::Integer, ::Type{T}) where {T<:Number}
-    maxr = Int(rmax)
-    nmax = totalsize(axis, maxr)
-    Amax = op.f(nmax, T)
-    size(Amax, 1) == nmax || throw(DimensionMismatch(
-        "LineBandedOp: f(n,T) size=$(size(Amax)) but totalsize(axis,rmax)=$nmax (note: caching ignores axis type)"))
-    size(Amax, 2) == nmax || throw(DimensionMismatch(
-        "LineBandedOp: f(n,T) size=$(size(Amax)) but totalsize(axis,rmax)=$nmax (note: caching ignores axis type)"))
-
-    is_banded = Amax isa BandedMatrices.AbstractBandedMatrix
-    plans = Vector{Any}(undef, maxr + 1)
-    @inbounds for r in 0:maxr
-        n = totalsize(axis, r)
-        if n == 0
-            plans[r + 1] = is_banded ? BandedMatrices.BandedMatrix{T}(undef, (0, 0), (0, 0)) : Matrix{T}(undef, 0, 0)
-            continue
-        end
-
-        S = @view Amax[1:n, 1:n]
-        if is_banded
-            l, u = bandwidths(S)
-            plans[r + 1] = BandedMatrices._BandedMatrix(BandedMatrices.bandeddata(S), n, l, u)
-        else
-            plans[r + 1] = S
-        end
-    end
     return plans
 end
 
@@ -655,25 +698,19 @@ apply_line!(op::AbstractLineOp, buf::AbstractVector, work::AbstractVector,
             nodes::AbstractUnivariateNodes, r::Int) =
     apply_line!(op, buf, work, nodes, r, nothing)
 
-# Built-in in-place ops
 @inline apply_line!(::IdentityLineOp, buf::AbstractVector, work::AbstractVector,
                     ::AbstractUnivariateNodes, ::Int, plan) = buf
 
-function apply_line!(outbuf::AbstractVector{T}, op::LineMatrixOp, inp::AbstractVector{T}, work::AbstractVector{T},
+function apply_line!(outbuf::AbstractVector{T}, ::ZeroLineOp, inp::AbstractVector{T}, work::AbstractVector{T},
                      ::AbstractUnivariateNodes, level::Int, plan) where {T}
-    A = _mat_for_level(op, level)
-    n = length(inp)
-    length(outbuf) == n || throw(DimensionMismatch("fiber length mismatch"))
-    size(A, 1) == n || throw(DimensionMismatch("matrix size mismatch at refinement index=$level"))
-    size(A, 2) == n || throw(DimensionMismatch("matrix size mismatch at refinement index=$level"))
-    mul!(outbuf, A, inp)
+    length(outbuf) == inp || throw(DimensionMismatch("fiber length mismatch"))
+    fill!(outbuf, zero(T))
     return outbuf
 end
 
-function apply_line!(outbuf::AbstractVector{T}, op::LineBandedOp{:full}, inp::AbstractVector{T}, work::AbstractVector{T},
+function apply_line!(outbuf::AbstractVector{T}, op::LineMatrixOp, inp::AbstractVector{T}, work::AbstractVector{T},
                      ::AbstractUnivariateNodes, level::Int, plan) where {T}
-    plan === nothing && throw(ArgumentError("missing plan for LineBandedOp{:full} at refinement index=$level"))
-    A = plan
+    A = op.mats[level + 1]
     n = length(inp)
     length(outbuf) == n || throw(DimensionMismatch("fiber length mismatch"))
     size(A, 1) == n || throw(DimensionMismatch("matrix size mismatch at refinement index=$level"))
@@ -695,72 +732,56 @@ function apply_line!(outbuf::AbstractVector{T}, op::LineDiagonalOp, inp::Abstrac
     return outbuf
 end
 
-@inline function _banded_lower_mul!(out::AbstractVector{T}, A, x::AbstractVector{T}) where {T}
-    n = length(x)
-    length(out) == n || throw(DimensionMismatch("fiber length mismatch"))
-    if A isa BandedMatrices.AbstractBandedMatrix
-        l, _ = bandwidths(A)
-        @inbounds for i in 1:n
-            acc = zero(T)
-            jmin = max(1, i - l)
-            for j in jmin:i
-                acc += A[i, j] * x[j]
-            end
-            out[i] = acc
-        end
-    else
-        @inbounds for i in 1:n
-            acc = zero(T)
-            for j in 1:i
-                acc += A[i, j] * x[j]
-            end
-            out[i] = acc
-        end
-    end
-    return out
-end
-
-@inline function _banded_upper_strict_mul!(out::AbstractVector{T}, A, x::AbstractVector{T}) where {T}
-    n = length(x)
-    length(out) == n || throw(DimensionMismatch("fiber length mismatch"))
-    if A isa BandedMatrices.AbstractBandedMatrix
-        _, u = bandwidths(A)
-        @inbounds for i in 1:n
-            acc = zero(T)
-            jmax = min(n, i + u)
-            for j in (i + 1):jmax
-                acc += A[i, j] * x[j]
-            end
-            out[i] = acc
-        end
-    else
-        @inbounds for i in 1:n
-            acc = zero(T)
-            for j in (i + 1):n
-                acc += A[i, j] * x[j]
-            end
-            out[i] = acc
-        end
-    end
-    return out
+function apply_line!(outbuf::AbstractVector{T}, op::LineBandedOp{:full}, inp::AbstractVector{T}, work::AbstractVector{T},
+                     ::AbstractUnivariateNodes, level::Int, plan) where {T}
+    plan === nothing && throw(ArgumentError("missing plan for LineBandedOp{:full} at refinement index=$level"))
+    A = plan
+    n = length(inp)
+    length(outbuf) == n || throw(DimensionMismatch("fiber length mismatch"))
+    size(A, 1) == n || throw(DimensionMismatch("LineBandedOp{:full} size mismatch at refinement index=$level"))
+    size(A, 2) == n || throw(DimensionMismatch("LineBandedOp{:full} size mismatch at refinement index=$level"))
+    mul!(outbuf, A, inp)
+    return outbuf
 end
 
 function apply_line!(outbuf::AbstractVector{T}, ::LineBandedOp{:lower}, inp::AbstractVector{T}, work::AbstractVector{T},
                      ::AbstractUnivariateNodes, level::Int, plan) where {T}
     plan === nothing && throw(ArgumentError("missing plan for LineBandedOp{:lower} at refinement index=$level"))
     A = plan
-    size(A, 1) == length(inp) || throw(DimensionMismatch("matrix size mismatch at refinement index=$level"))
-    size(A, 2) == length(inp) || throw(DimensionMismatch("matrix size mismatch at refinement index=$level"))
-    return _banded_lower_mul!(outbuf, A, inp)
+    n = length(inp)
+    size(A, 1) == n || throw(DimensionMismatch("LineBandedOp{:lower} size mismatch at refinement index=$level"))
+    size(A, 2) == n || throw(DimensionMismatch("LineBandedOp{:lower} size mismatch at refinement index=$level"))
+    length(outbuf) == n || throw(DimensionMismatch("fiber length mismatch"))
+    l, _ = bandwidths(A)
+    @inbounds for i in 1:n
+        acc = zero(T)
+        jmin = max(1, i - l)
+        for j in jmin:i
+            acc += A[i, j] * inp[j]
+        end
+        outbuf[i] = acc
+    end
+    return outbuf
 end
 
 function apply_line!(outbuf::AbstractVector{T}, ::LineBandedOp{:upper}, inp::AbstractVector{T}, work::AbstractVector{T},
                      ::AbstractUnivariateNodes, level::Int, plan) where {T}
     plan === nothing && throw(ArgumentError("missing plan for LineBandedOp{:upper} at refinement index=$level"))
     A = plan
-    size(A, 1) == length(inp) || throw(DimensionMismatch("matrix size mismatch at refinement index=$level"))
-    size(A, 2) == length(inp) || throw(DimensionMismatch("matrix size mismatch at refinement index=$level"))
-    return _banded_upper_strict_mul!(outbuf, A, inp)
+    n = length(inp)
+    size(A, 1) == n || throw(DimensionMismatch("LineBandedOp{:upper} size mismatch at refinement index=$level"))
+    size(A, 2) == n || throw(DimensionMismatch("LineBandedOp{:upper} size mismatch at refinement index=$level"))
+    length(outbuf) == n || throw(DimensionMismatch("fiber length mismatch"))
+    _, u = bandwidths(A)
+    @inbounds for i in 1:n
+        acc = zero(T)
+        jmax = min(n, i + u)
+        for j in (i + 1):jmax
+            acc += A[i, j] * inp[j]
+        end
+        outbuf[i] = acc
+    end
+    return outbuf
 end
 
 function apply_line!(outbuf::AbstractVector{T}, op::LineEvalOp{T}, inp::AbstractVector{T}, work::AbstractVector{T},
@@ -809,234 +830,114 @@ end
     return destdata
 end
 
-@inline function _banded_scatter_full!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
-                                       A, x::AbstractVector{T}) where {T}
-    n = length(x)
-    if A isa BandedMatrices.AbstractBandedMatrix
-        l, u = bandwidths(A)
-        @inbounds for i in 1:n
-            acc = zero(T)
-            jmin = max(1, i - l)
-            jmax = min(n, i + u)
-            for j in jmin:jmax
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] = acc
-            rowptr[i] = idx + 1
-        end
-    else
-        @inbounds for i in 1:n
-            acc = zero(T)
-            for j in 1:n
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] = acc
-            rowptr[i] = idx + 1
-        end
-    end
-    return destdata
-end
-
-@inline function _banded_scatter_full_add!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
-                                           A, x::AbstractVector{T}) where {T}
-    n = length(x)
-    if A isa BandedMatrices.AbstractBandedMatrix
-        l, u = bandwidths(A)
-        @inbounds for i in 1:n
-            acc = zero(T)
-            jmin = max(1, i - l)
-            jmax = min(n, i + u)
-            for j in jmin:jmax
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] += acc
-            rowptr[i] = idx + 1
-        end
-    else
-        @inbounds for i in 1:n
-            acc = zero(T)
-            for j in 1:n
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] += acc
-            rowptr[i] = idx + 1
-        end
-    end
-    return destdata
-end
-
-@inline function _banded_scatter_lower!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
-                                        A, x::AbstractVector{T}) where {T}
-    n = length(x)
-    if A isa BandedMatrices.AbstractBandedMatrix
-        l, _ = bandwidths(A)
-        @inbounds for i in 1:n
-            acc = zero(T)
-            jmin = max(1, i - l)
-            for j in jmin:i
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] = acc
-            rowptr[i] = idx + 1
-        end
-    else
-        @inbounds for i in 1:n
-            acc = zero(T)
-            for j in 1:i
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] = acc
-            rowptr[i] = idx + 1
-        end
-    end
-    return destdata
-end
-
-@inline function _banded_scatter_lower_add!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
-                                            A, x::AbstractVector{T}) where {T}
-    n = length(x)
-    if A isa BandedMatrices.AbstractBandedMatrix
-        l, _ = bandwidths(A)
-        @inbounds for i in 1:n
-            acc = zero(T)
-            jmin = max(1, i - l)
-            for j in jmin:i
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] += acc
-            rowptr[i] = idx + 1
-        end
-    else
-        @inbounds for i in 1:n
-            acc = zero(T)
-            for j in 1:i
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] += acc
-            rowptr[i] = idx + 1
-        end
-    end
-    return destdata
-end
-
-@inline function _banded_scatter_upper!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
-                                        A, x::AbstractVector{T}) where {T}
-    n = length(x)
-    if A isa BandedMatrices.AbstractBandedMatrix
-        _, u = bandwidths(A)
-        @inbounds for i in 1:n
-            acc = zero(T)
-            jmax = min(n, i + u)
-            for j in (i + 1):jmax
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] = acc
-            rowptr[i] = idx + 1
-        end
-    else
-        @inbounds for i in 1:n
-            acc = zero(T)
-            for j in (i + 1):n
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] = acc
-            rowptr[i] = idx + 1
-        end
-    end
-    return destdata
-end
-
-@inline function _banded_scatter_upper_add!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
-                                            A, x::AbstractVector{T}) where {T}
-    n = length(x)
-    if A isa BandedMatrices.AbstractBandedMatrix
-        _, u = bandwidths(A)
-        @inbounds for i in 1:n
-            acc = zero(T)
-            jmax = min(n, i + u)
-            for j in (i + 1):jmax
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] += acc
-            rowptr[i] = idx + 1
-        end
-    else
-        @inbounds for i in 1:n
-            acc = zero(T)
-            for j in (i + 1):n
-                acc += A[i, j] * x[j]
-            end
-            idx = rowptr[i]
-            destdata[idx] += acc
-            rowptr[i] = idx + 1
-        end
-    end
-    return destdata
-end
-
 function apply_scatter!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
                         op::LineBandedOp{:full}, inp::AbstractVector{T}, outbuf::AbstractVector{T},
-                        work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, plan) where {T}
-    plan === nothing && throw(ArgumentError("missing plan for LineBandedOp{:full} at refinement index=$r"))
-    A = plan
-    if A isa BandedMatrices.AbstractBandedMatrix
-        return _banded_scatter_full!(destdata, rowptr, A, inp)
-    else
-        apply_line!(outbuf, op, inp, work, axis, r, plan)
-        return _scatter_copy!(destdata, rowptr, outbuf)
+                        work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, A::BandedMatrices.AbstractBandedMatrix) where {T}
+    n = length(inp)
+    l, u = bandwidths(A)
+    @inbounds for i in 1:n
+        acc = zero(T)
+        jmin = max(1, i - l)
+        jmax = min(n, i + u)
+        for j in jmin:jmax
+            acc += A[i, j] * inp[j]
+        end
+        idx = rowptr[i]
+        destdata[idx] = acc
+        rowptr[i] = idx + 1
     end
+    return destdata
 end
 
 function apply_scatter_add!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
                             op::LineBandedOp{:full}, inp::AbstractVector{T}, outbuf::AbstractVector{T},
-                            work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, plan) where {T}
-    plan === nothing && throw(ArgumentError("missing plan for LineBandedOp{:full} at refinement index=$r"))
-    A = plan
-    if A isa BandedMatrices.AbstractBandedMatrix
-        return _banded_scatter_full_add!(destdata, rowptr, A, inp)
-    else
-        apply_line!(outbuf, op, inp, work, axis, r, plan)
-        return _scatter_add!(destdata, rowptr, outbuf)
+                            work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, A::BandedMatrices.AbstractBandedMatrix) where {T}
+    n = length(inp)
+    l, u = bandwidths(A)
+    @inbounds for i in 1:n
+        acc = zero(T)
+        jmin = max(1, i - l)
+        jmax = min(n, i + u)
+        for j in jmin:jmax
+            acc += A[i, j] * inp[j]
+        end
+        idx = rowptr[i]
+        destdata[idx] += acc
+        rowptr[i] = idx + 1
     end
+    return destdata
 end
 
 function apply_scatter!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
                         op::LineBandedOp{:lower}, inp::AbstractVector{T}, outbuf::AbstractVector{T},
-                        work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, plan) where {T}
-    plan === nothing && throw(ArgumentError("missing plan for LineBandedOp{:lower} at refinement index=$r"))
-    return _banded_scatter_lower!(destdata, rowptr, plan, inp)
+                        work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, A::BandedMatrices.AbstractBandedMatrix) where {T}
+    n = length(inp)
+    l, u = bandwidths(A)
+    @inbounds for i in 1:n
+        acc = zero(T)
+        jmin = max(1, i - l)
+        for j in jmin:i
+            acc += A[i, j] * inp[j]
+        end
+        idx = rowptr[i]
+        destdata[idx] = acc
+        rowptr[i] = idx + 1
+    end
+    return destdata
 end
 
 function apply_scatter_add!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
                             op::LineBandedOp{:lower}, inp::AbstractVector{T}, outbuf::AbstractVector{T},
-                            work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, plan) where {T}
-    plan === nothing && throw(ArgumentError("missing plan for LineBandedOp{:lower} at refinement index=$r"))
-    return _banded_scatter_lower_add!(destdata, rowptr, plan, inp)
+                            work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, A::BandedMatrices.AbstractBandedMatrix) where {T}
+    n = length(inp)
+    l, u = bandwidths(A)
+    @inbounds for i in 1:n
+        acc = zero(T)
+        jmin = max(1, i - l)
+        for j in jmin:i
+            acc += A[i, j] * inp[j]
+        end
+        idx = rowptr[i]
+        destdata[idx] += acc
+        rowptr[i] = idx + 1
+    end
+    return destdata
 end
 
 function apply_scatter!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
                         op::LineBandedOp{:upper}, inp::AbstractVector{T}, outbuf::AbstractVector{T},
-                        work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, plan) where {T}
-    plan === nothing && throw(ArgumentError("missing plan for LineBandedOp{:upper} at refinement index=$r"))
-    return _banded_scatter_upper!(destdata, rowptr, plan, inp)
+                        work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, A::BandedMatrices.AbstractBandedMatrix) where {T}
+    n = length(inp)
+    _, u = bandwidths(A)
+    @inbounds for i in 1:n
+        acc = zero(T)
+        jmax = min(n, i + u)
+        for j in (i + 1):jmax
+            acc += A[i, j] * inp[j]
+        end
+        idx = rowptr[i]
+        destdata[idx] = acc
+        rowptr[i] = idx + 1
+    end
+    return destdata
 end
 
 function apply_scatter_add!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer},
                             op::LineBandedOp{:upper}, inp::AbstractVector{T}, outbuf::AbstractVector{T},
-                            work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, plan) where {T}
-    plan === nothing && throw(ArgumentError("missing plan for LineBandedOp{:upper} at refinement index=$r"))
-    return _banded_scatter_upper_add!(destdata, rowptr, plan, inp)
+                            work::AbstractVector{T}, axis::AbstractUnivariateNodes, r::Int, A::BandedMatrices.AbstractBandedMatrix) where {T}
+    n = length(inp)
+    _, u = bandwidths(A)
+    @inbounds for i in 1:n
+        acc = zero(T)
+        jmax = min(n, i + u)
+        for j in (i + 1):jmax
+            acc += A[i, j] * inp[j]
+        end
+        idx = rowptr[i]
+        destdata[idx] += acc
+        rowptr[i] = idx + 1
+    end
+    return destdata
 end
 
 # ----------------------------------------------------------------------------
@@ -1059,30 +960,28 @@ end
 Cached row and fiber metadata for one cyclic storage orientation.
 """
 struct OrientationLayout{D,Ti<:Integer}
-    perm::SVector{D,Int}
     first_offsets::Vector{Ti}   # 1-based row starts for the cycled layout
     maxlen::Ti                  # maximum fiber length in this orientation
     nfibers::Ti                 # number of last-dimension fibers in this orientation
-    total_work::Ti              # total fiber length in this orientation
     fibers::Vector{LastDimFiber{D}}
 end
 
 """
     struct FiberChunkPlan{Ti<:Integer}
 
-Cached partition of last-dimension fibers into parallel chunks for one sweep shape.
+Cached overdecomposition of last-dimension fibers into contiguous queue chunks.
 """
 struct FiberChunkPlan{Ti<:Integer}
     ranges::Vector{UnitRange{Int}}
-    startptrs::Matrix{Ti}   # size (maxlen, P)
+    startptrs::Matrix{Ti}   # size (maxlen, nchunks)
 end
 
 """
-    struct FiberChunkBuffers{T<:Number,Ti<:Integer}
+    struct FiberWorkerBuffers{T<:Number,Ti<:Integer}
 
-Per-chunk scratch buffers for threaded last-dimension sweeps.
+Per-worker scratch buffers for threaded last-dimension sweeps.
 """
-struct FiberChunkBuffers{T<:Number,Ti<:Integer}
+struct FiberWorkerBuffers{T<:Number,Ti<:Integer}
     bufA::Vector{Vector{T}}
     bufB::Vector{Vector{T}}
     work::Vector{Vector{T}}
@@ -1098,7 +997,8 @@ struct CyclicLayoutMeta{D,Ti<:Integer}
     layouts::NTuple{D,OrientationLayout{D,Ti}}
     refinement_caps::SVector{D,Int}
     lineplans::Dict{Tuple,AbstractVector}
-    fiber_chunk_plans::Dict{Tuple,FiberChunkPlan{Ti}}
+    fiber_queue_plans::NTuple{D,FiberChunkPlan{Ti}}
+    pool::Int
 end
 
 """
@@ -1113,6 +1013,7 @@ struct CyclicLayoutWorkspace{Ti<:Integer,T<:Number}
     scratch3::Vector{T}
     unidir_buf::Vector{T}
     x_buf::Vector{T}
+    rot_buf::Vector{T}
     work_buf::Vector{T}
     acc_buf::Vector{T}
 end
@@ -1120,13 +1021,13 @@ end
 """
     struct CyclicLayoutPlan{D,Ti<:Integer,T<:Number}
 
-Reusable cyclic-layout plan with shared metadata and one mutable execution workspace.
+Reusable cyclic-layout plan with shared metadata and mutable worker scratch.
 """
 struct CyclicLayoutPlan{D,Ti<:Integer,T<:Number}
     meta::CyclicLayoutMeta{D,Ti}
     workspace::CyclicLayoutWorkspace{Ti,T}
-    fiber_chunk_buffers::Dict{Int,FiberChunkBuffers{T,Ti}}
-    term_workspaces::Dict{Int,Vector{CyclicLayoutWorkspace{Ti,T}}}
+    fiber_workers::FiberWorkerBuffers{T,Ti}
+    term_workspaces::Vector{CyclicLayoutWorkspace{Ti,T}}
 end
 
 function CyclicLayoutWorkspace(::Type{Ti}, ::Type{T}, maxlen::Int, N::Int; xlen::Int=N) where {Ti<:Integer,T<:Number}
@@ -1136,6 +1037,7 @@ function CyclicLayoutWorkspace(::Type{Ti}, ::Type{T}, maxlen::Int, N::Int; xlen:
                                        Vector{T}(undef, maxlen),
                                        Vector{T}(undef, N),
                                        Vector{T}(undef, xlen),
+                                       Vector{T}(undef, N),
                                        Vector{T}(undef, N),
                                        Vector{T}(undef, N))
 end
@@ -1236,48 +1138,6 @@ Iterate the last-dimension fibers of `grid` in the identity orientation.
 """
 each_lastdim_fiber(grid::SparseGrid{<:SparseGridSpec{D}}) where {D} = each_lastdim_fiber(grid, SVector{D,Int}(ntuple(identity, D)))
 
-### Row metadata (counts/offsets) for fused-write kernels
-
-"""
-    _layout_rowmeta(spec; Ti=Int)
-
-Compute row offsets for fused-write recursive layout traversal.
-"""
-function _layout_rowmeta(spec::SparseGridSpec{D}; Ti::Type{<:Integer}=Int) where {D}
-    axes = spec.axes
-    @inbounds for d in 1:D
-        is_nested(axes[d]) || throw(ArgumentError("_layout_rowmeta requires nested 1D axis families (dim=$d, got $(typeof(axes[d])))"))
-    end
-
-    fibers = each_lastdim_fiber(spec)
-    isempty(fibers) && return Ti[], Ti(0)
-
-    max_last_refinement = maximum(fib.last_refinement for fib in fibers)
-    maxlen = maximum(fib.len for fib in fibers)
-    count_by_last_refinement = zeros(Int, max_last_refinement + 1)
-    for fib in fibers
-        count_by_last_refinement[fib.last_refinement + 1] += 1
-    end
-
-    diff = zeros(Int, maxlen + 2)
-    @inbounds for t in 0:max_last_refinement
-        c = count_by_last_refinement[t + 1]
-        c == 0 && continue
-        len = totalsize(axes[D], t)
-        diff[1] += c
-        diff[len + 1] -= c
-    end
-
-    offsets = Vector{Ti}(undef, maxlen)
-    running = 0
-    off = Ti(1)
-    @inbounds for k in 1:maxlen
-        running += diff[k]
-        offsets[k] = off
-        off += Ti(running)
-    end
-    return offsets, Ti(maxlen)
-end
 # ----------------------------------------------------------------------------
 # Cyclic layout plan construction
 
@@ -1285,38 +1145,77 @@ end
     CyclicLayoutPlan(grid, ::Type{T}; Ti=Int)
 
 Build a reusable cyclic-layout plan for `grid` and coefficient element type `T`.
+The plan captures the current `:default` thread-pool size and precomputes one
+layout-only fiber queue per cyclic orientation.
 """
 function CyclicLayoutPlan(grid::SparseGrid{<:SparseGridSpec{D}}, ::Type{T};
                           Ti::Type{<:Integer}=Int) where {D,T<:Number}
     I = grid.spec.indexset
     caps = refinement_caps(I)
 
+    idperm = SVector{D,Int}(ntuple(identity, Val(D)))
     layouts = ntuple(o -> begin
-        perm = cycle_last_to_front(_perm_id(Val(D)), o - 1)
+        perm = cycle_last_to_front(idperm, o - 1)
         spec_o = oriented_spec(grid.spec, perm)
+        axes_o = spec_o.axes
+        @inbounds for d in 1:D
+            is_nested(axes_o[d]) || throw(ArgumentError("CyclicLayoutPlan requires nested 1D axis families (dim=$d, got $(typeof(axes_o[d])))"))
+        end
+
         fibers = each_lastdim_fiber(spec_o)
-        offsets, maxlen = _layout_rowmeta(spec_o; Ti=Ti)
-        OrientationLayout{D,Ti}(perm,
-                                offsets,
+        if isempty(fibers)
+            offsets = Ti[]
+            maxlen = Ti(0)
+        else
+            max_last_refinement = maximum(fib.last_refinement for fib in fibers)
+            maxlen_int = maximum(fib.len for fib in fibers)
+            count_by_last_refinement = zeros(Int, max_last_refinement + 1)
+            @inbounds for fib in fibers
+                count_by_last_refinement[fib.last_refinement + 1] += 1
+            end
+
+            diff = zeros(Int, maxlen_int + 2)
+            @inbounds for t in 0:max_last_refinement
+                c = count_by_last_refinement[t + 1]
+                c == 0 && continue
+                len = totalsize(axes_o[D], t)
+                diff[1] += c
+                diff[len + 1] -= c
+            end
+
+            offsets = Vector{Ti}(undef, maxlen_int)
+            running = 0
+            off = Ti(1)
+            @inbounds for k in 1:maxlen_int
+                running += diff[k]
+                offsets[k] = off
+                off += Ti(running)
+            end
+            maxlen = Ti(maxlen_int)
+        end
+        OrientationLayout{D,Ti}(offsets,
                                 maxlen,
                                 Ti(length(fibers)),
-                                Ti(sum(fib.len for fib in fibers)),
                                 fibers)
     end, D)
 
+    pool = max(Threads.threadpoolsize(:default), 1)
+    fiber_queue_plans = ntuple(o -> _build_fiber_queue_plan(layouts[o], pool), D)
     maxmaxlen = maximum(Int(layout.maxlen) for layout in layouts)
-    workspace = CyclicLayoutWorkspace(Ti, T, maxmaxlen, length(grid))
+    N = length(grid)
+    workspace = CyclicLayoutWorkspace(Ti, T, maxmaxlen, N)
+    fiber_workers = FiberWorkerBuffers{T,Ti}([Vector{T}(undef, maxmaxlen) for _ in 1:pool],
+                                             [Vector{T}(undef, maxmaxlen) for _ in 1:pool],
+                                             [Vector{T}(undef, maxmaxlen) for _ in 1:pool],
+                                             Matrix{Ti}(undef, maxmaxlen, pool))
+    term_workspaces = [CyclicLayoutWorkspace(Ti, T, maxmaxlen, N; xlen=0) for _ in 1:pool]
     meta = CyclicLayoutMeta{D,Ti}(layouts,
                                   caps,
                                   Dict{Tuple,AbstractVector}(),
-                                  Dict{Tuple,FiberChunkPlan{Ti}}())
-    return CyclicLayoutPlan{D,Ti,T}(meta,
-                                   workspace,
-                                   Dict{Int,FiberChunkBuffers{T,Ti}}(),
-                                   Dict{Int,Vector{CyclicLayoutWorkspace{Ti,T}}}())
+                                  fiber_queue_plans,
+                                  pool)
+    return CyclicLayoutPlan{D,Ti,T}(meta, workspace, fiber_workers, term_workspaces)
 end
-
-# Unidirectional apply primitive
 
 @inline function _scatter_copy!(destdata::AbstractVector, rowptr::AbstractVector{<:Integer}, src::AbstractVector)
     @inbounds for k in eachindex(src)
@@ -1530,9 +1429,6 @@ end
     return _scatter_add!(destdata, rowptr, cur)
 end
 
-@inline _default_parallel_width() = max(Threads.threadpoolsize(:default), 1)
-const _TERM_PARALLEL_WORKSPACE_BUDGET = 512 * 1024 * 1024
-
 @inline function _orient_of_perm(perm::SVector{D,Int}) where {D}
     orient = findfirst(==(1), perm)
     orient === nothing && return 0
@@ -1542,155 +1438,28 @@ const _TERM_PARALLEL_WORKSPACE_BUDGET = 512 * 1024 * 1024
     return orient
 end
 
-@inline _orient_for_lastdim(::Val{D}, d::Int) where {D} = mod(D - d, D) + 1
+function _build_fiber_queue_plan(layout::OrientationLayout{D,Ti}, pool::Int) where {D,Ti<:Integer}
+    nfibers = Int(layout.nfibers)
+    maxlen = Int(layout.maxlen)
+    nfibers == 0 && return FiberChunkPlan{Ti}(UnitRange{Int}[], Matrix{Ti}(undef, maxlen, 0))
 
-@inline function _matrix_costproxy(A, n::Int)
-    nn = Float64(n)
-    if A isa LinearAlgebra.Diagonal
-        return nn
-    elseif A isa BandedMatrices.AbstractBandedMatrix
-        l, u = bandwidths(A)
-        return nn * min(nn, Float64(l + u + 1))
-    elseif A isa Union{LinearAlgebra.LowerTriangular,LinearAlgebra.UnitLowerTriangular,
-                       LinearAlgebra.UpperTriangular,LinearAlgebra.UnitUpperTriangular}
-        return 0.5 * nn * (nn + 1.0)
-    else
-        return nn * nn
-    end
-end
-
-@inline _lineop_costproxy(::IdentityLineOp, n::Int, r::Int, plan1d) = Float64(n)
-@inline _lineop_costproxy(::ZeroLineOp, n::Int, r::Int, plan1d) = Float64(n)
-@inline _lineop_costproxy(::Union{LineTransform,LineChebyshevLegendre,
-                                  LineHierarchize,LineDehierarchize,
-                                  LineHierarchizeTranspose,LineDehierarchizeTranspose},
-                          n::Int, r::Int, plan1d) = Float64(n) * log2(Float64(n) + 1.0)
-@inline _lineop_costproxy(::LineDiagonalOp, n::Int, r::Int, plan1d) = Float64(n)
-@inline _lineop_costproxy(op::LineEvalOp, n::Int, r::Int, plan1d) = Float64(op.m) * Float64(n)
-@inline _lineop_costproxy(op::LineMatrixOp, n::Int, r::Int, plan1d) = _matrix_costproxy(_mat_for_level(op, r), n)
-@inline function _lineop_costproxy(op::LineBandedOp, n::Int, r::Int, plan1d)
-    plan1d === nothing && return Float64(n) * Float64(n)
-    return _matrix_costproxy(plan1d, n)
-end
-@inline _lineop_costproxy(::AbstractLineOp, n::Int, r::Int, plan1d) = Float64(n)
-
-function _layout_work_stats(layout::OrientationLayout, ops::Tuple, planvecs::Tuple)
-    total = 0.0
-    maxw = 0.0
-    fibers = layout.fibers
-    @inbounds for fib in fibers
-        w = 0.0
-        for i in eachindex(ops)
-            pv = planvecs[i]
-            plan1d = pv === nothing ? nothing : pv[fib.last_refinement + 1]
-            w += _lineop_costproxy(ops[i], fib.len, fib.last_refinement, plan1d)
-        end
-        total += w
-        maxw = max(maxw, w)
-    end
-    return total, maxw
-end
-
-@inline function _fiber_threaded_workers(layout::OrientationLayout, parallel_width::Integer,
-                                         total_work::Real, max_work::Real)
-    P = min(max(Int(parallel_width), 1), Int(layout.nfibers))
-    P <= 1 && return 0
-    return (Int(layout.nfibers) >= 2 * P && total_work >= 4 * max_work) ? P : 0
-end
-
-@inline _lineop_chunk_key(::IdentityLineOp, planvec) = (:identity,)
-@inline _lineop_chunk_key(::ZeroLineOp, planvec) = (:zero,)
-@inline _lineop_chunk_key(op::Union{LineTransform,LineChebyshevLegendre,
-                                    LineHierarchize,LineDehierarchize,
-                                    LineHierarchizeTranspose,LineDehierarchizeTranspose}, planvec) =
-    (plan_family(typeof(op)),)
-@inline _lineop_chunk_key(::LineDiagonalOp, planvec) = (:diagonal,)
-@inline _lineop_chunk_key(op::LineEvalOp, planvec) = (:eval, op.m, size(op.V, 2))
-@inline _lineop_chunk_key(op::LineMatrixOp, planvec) = (:matrix, typeof(_mat_for_level(op, length(op.mats) - 1)))
-@inline function _lineop_chunk_key(op::LineBandedOp{Part,F}, planvec) where {Part,F}
-    if planvec === nothing
-        return (:banded, Part, F)
-    end
-    A = planvec[end]
-    if A isa BandedMatrices.AbstractBandedMatrix
-        l, u = bandwidths(A)
-        return (:banded, Part, F, l, u)
-    end
-    return (:banded, Part, F, size(A, 1))
-end
-@inline _lineop_chunk_key(op::AbstractLineOp, planvec) = (typeof(op),)
-
-function _ops_chunk_key(ops::Tuple, planvecs::Tuple)
-    return ntuple(i -> _lineop_chunk_key(ops[i], planvecs[i]), length(ops))
-end
-
-function _sweep_cost_stats(layout::OrientationLayout,
-                           axis::AbstractUnivariateNodes,
-                           cap::Int,
-                           op::AbstractLineOp,
-                           lineplans::Dict{Tuple,AbstractVector},
-                           ::Type{ElT},
-                           parallel_width::Int) where {ElT}
-    ops = lineops(op)
-    planvecs = map(oi -> _get_lineplanvec!(lineplans, oi, axis, cap, ElT), ops)
-    total, maxw = _layout_work_stats(layout, ops, planvecs)
-    P = _fiber_threaded_workers(layout, parallel_width, total, maxw)
-    threaded = P == 0 ? total : max(maxw, total / P)
-    return (serial=total, threaded=threaded)
-end
-
-function _partition_ranges_by_weight(weights::AbstractVector{<:Real}, P::Int)
-    n = length(weights)
-    n == 0 && return UnitRange{Int}[]
-    P = clamp(P, 1, n)
-    P == 1 && return [1:n]
-
-    prefix = Vector{Float64}(undef, n)
-    total = 0.0
-    @inbounds for i in 1:n
-        total += Float64(weights[i])
-        prefix[i] = total
-    end
-
-    ranges = Vector{UnitRange{Int}}(undef, P)
+    nchunks = min(nfibers, max(1, 4 * max(pool, 1)))
+    ranges = Vector{UnitRange{Int}}(undef, nchunks)
+    base = fld(nfibers, nchunks)
+    rem = mod(nfibers, nchunks)
     start = 1
-    for c in 1:(P - 1)
-        target = total * c / P
-        stop = searchsortedfirst(prefix, target)
-        stop = max(stop, start)
-        stop = min(stop, n - (P - c))
+    @inbounds for c in 1:nchunks
+        len = base + (c <= rem ? 1 : 0)
+        stop = start + len - 1
         ranges[c] = start:stop
         start = stop + 1
     end
-    ranges[P] = start:n
-    return ranges
-end
 
-function _build_fiber_chunk_plan(layout::OrientationLayout{D,Ti},
-                                 P::Int,
-                                 ops::Tuple,
-                                 planvecs::Tuple) where {D,Ti<:Integer}
-    fibers = layout.fibers
-    weights = Vector{Float64}(undef, length(fibers))
-    @inbounds for i in eachindex(fibers)
-        fib = fibers[i]
-        w = 0.0
-        for j in eachindex(ops)
-            pv = planvecs[j]
-            plan1d = pv === nothing ? nothing : pv[fib.last_refinement + 1]
-            w += _lineop_costproxy(ops[j], fib.len, fib.last_refinement, plan1d)
-        end
-        weights[i] = w
-    end
-
-    ranges = _partition_ranges_by_weight(weights, P)
-    P2 = length(ranges)
-    maxlen = Int(layout.maxlen)
-    startptrs = Matrix{Ti}(undef, maxlen, P2)
+    startptrs = Matrix{Ti}(undef, maxlen, nchunks)
     running = zeros(Ti, maxlen)
     diff = zeros(Int, maxlen + 1)
-
-    @inbounds for c in 1:P2
+    fibers = layout.fibers
+    @inbounds for c in 1:nchunks
         for k in 1:maxlen
             startptrs[k, c] = layout.first_offsets[k] + running[k]
         end
@@ -1710,40 +1479,6 @@ function _build_fiber_chunk_plan(layout::OrientationLayout{D,Ti},
     end
 
     return FiberChunkPlan{Ti}(ranges, startptrs)
-end
-
-function _get_fiber_chunk_plan!(plan::CyclicLayoutPlan{D,Ti,T},
-                                orient::Int,
-                                P::Int,
-                                ops::Tuple,
-                                planvecs::Tuple) where {D,Ti<:Integer,T<:Number}
-    meta = plan.meta
-    key = (orient, P, _ops_chunk_key(ops, planvecs))
-    chunkplan = get(meta.fiber_chunk_plans, key, nothing)
-    if chunkplan === nothing
-        chunkplan = _build_fiber_chunk_plan(meta.layouts[orient], P, ops, planvecs)
-        meta.fiber_chunk_plans[key] = chunkplan
-    end
-    return chunkplan
-end
-
-function _get_fiber_chunk_buffers!(plan::CyclicLayoutPlan{D,Ti,T}, P::Int) where {D,Ti<:Integer,T<:Number}
-    bufs = get(plan.fiber_chunk_buffers, P, nothing)
-    maxlen = length(plan.workspace.write_ptr)
-    if bufs === nothing ||
-       length(bufs.bufA) != P ||
-       size(bufs.rowptr, 1) != maxlen ||
-       size(bufs.rowptr, 2) != P ||
-       any(length(v) != maxlen for v in bufs.bufA) ||
-       any(length(v) != maxlen for v in bufs.bufB) ||
-       any(length(v) != maxlen for v in bufs.work)
-        bufs = FiberChunkBuffers{T,Ti}([Vector{T}(undef, maxlen) for _ in 1:P],
-                                       [Vector{T}(undef, maxlen) for _ in 1:P],
-                                       [Vector{T}(undef, maxlen) for _ in 1:P],
-                                       Matrix{Ti}(undef, maxlen, P))
-        plan.fiber_chunk_buffers[P] = bufs
-    end
-    return bufs
 end
 
 @inline function _apply_fiber_chunk!(destdata::AbstractVector,
@@ -1812,8 +1547,8 @@ function _apply_lastdim_cycled!(dest::OrientedCoeffs{D,ElT},
                                 grid::SparseGrid,
                                 op::AbstractLineOp,
                                 plan::CyclicLayoutPlan{D,Ti,ElT},
-                                parallel_width::Int) where {D,Ti,ElT}
-    parallel_width = max(Int(parallel_width), 1)
+                                nworkers::Int) where {D,Ti,ElT}
+    nworkers = clamp(Int(nworkers), 1, plan.meta.pool)
 
     orient = _orient_of_perm(src.perm)
     orient == 0 && throw(ArgumentError("perm=$(src.perm) is not a cyclic orientation of the provided plan"))
@@ -1828,13 +1563,10 @@ function _apply_lastdim_cycled!(dest::OrientedCoeffs{D,ElT},
     planvecs = map(oi -> _get_lineplanvec!(plan.meta.lineplans, oi, axis_last, cap_last, ElT), ops)
 
     fibers = layout.fibers
-    P = 0
-    if parallel_width > 1 && Int(layout.nfibers) > 1
-        total, maxw = _layout_work_stats(layout, ops, planvecs)
-        P = _fiber_threaded_workers(layout, parallel_width, total, maxw)
-    end
+    chunkplan = plan.meta.fiber_queue_plans[orient]
+    worker_count = min(nworkers, length(chunkplan.ranges))
 
-    if P == 0
+    if worker_count <= 1 || Int(layout.nfibers) <= 1
         write_ptr = workspace.write_ptr
         @inbounds copyto!(write_ptr, 1, layout.first_offsets, 1, maxlen)
         scratch1 = workspace.scratch1
@@ -1850,21 +1582,43 @@ function _apply_lastdim_cycled!(dest::OrientedCoeffs{D,ElT},
                                    axis_last, fib.last_refinement, ElT)
         end
     else
-        chunkplan = _get_fiber_chunk_plan!(plan, orient, P, ops, planvecs)
-        bufs = _get_fiber_chunk_buffers!(plan, length(chunkplan.ranges))
+        bufs = plan.fiber_workers
+        nextchunk = Threads.Atomic{Int}(1)
         destdata = dest.data
         srcdata = src.data
-        @sync for cid in 1:length(chunkplan.ranges)
-            rg = chunkplan.ranges[cid]
-            isempty(rg) && continue
-            rowptr = @view bufs.rowptr[:, cid]
-            copyto!(rowptr, @view chunkplan.startptrs[:, cid])
-            bufA = bufs.bufA[cid]
-            bufB = bufs.bufB[cid]
-            work = bufs.work[cid]
-            Threads.@spawn :default _apply_fiber_chunk!($destdata, $srcdata, $fibers, $rg, $rowptr,
-                                                        $ops, $planvecs, $axis_last,
-                                                        $bufA, $bufB, $work, $ElT)
+        ranges = chunkplan.ranges
+        startptrs = chunkplan.startptrs
+        nchunks = length(ranges)
+        @sync for wid in 1:worker_count
+            rowptr = @view bufs.rowptr[:, wid]
+            bufA = bufs.bufA[wid]
+            bufB = bufs.bufB[wid]
+            work = bufs.work[wid]
+            Threads.@spawn :default begin
+                destdata1 = $destdata
+                srcdata1 = $srcdata
+                fibers1 = $fibers
+                ranges1 = $ranges
+                startptrs1 = $startptrs
+                nextchunk1 = $nextchunk
+                nchunks1 = $nchunks
+                rowptr1 = $rowptr
+                ops1 = $ops
+                planvecs1 = $planvecs
+                axis_last1 = $axis_last
+                bufA1 = $bufA
+                bufB1 = $bufB
+                work1 = $work
+                ElT1 = $ElT
+                while true
+                    cid = Threads.atomic_add!(nextchunk1, 1)
+                    cid > nchunks1 && break
+                    copyto!(rowptr1, @view startptrs1[:, cid])
+                    _apply_fiber_chunk!(destdata1, srcdata1, fibers1, ranges1[cid], rowptr1,
+                                        ops1, planvecs1, axis_last1,
+                                        bufA1, bufB1, work1, ElT1)
+                end
+            end
         end
     end
 
@@ -1876,8 +1630,8 @@ function _apply_lastdim_cycled_add!(destdata::Vector{ElT},
                                     grid::SparseGrid,
                                     op::AbstractLineOp,
                                     plan::CyclicLayoutPlan{D,Ti,ElT},
-                                    parallel_width::Int) where {D,Ti,ElT}
-    parallel_width = max(Int(parallel_width), 1)
+                                    nworkers::Int) where {D,Ti,ElT}
+    nworkers = clamp(Int(nworkers), 1, plan.meta.pool)
 
     orient = _orient_of_perm(src.perm)
     orient == 0 && throw(ArgumentError("perm=$(src.perm) is not a cyclic orientation of the provided plan"))
@@ -1892,13 +1646,10 @@ function _apply_lastdim_cycled_add!(destdata::Vector{ElT},
     planvecs = map(oi -> _get_lineplanvec!(plan.meta.lineplans, oi, axis_last, cap_last, ElT), ops)
 
     fibers = layout.fibers
-    P = 0
-    if parallel_width > 1 && Int(layout.nfibers) > 1
-        total, maxw = _layout_work_stats(layout, ops, planvecs)
-        P = _fiber_threaded_workers(layout, parallel_width, total, maxw)
-    end
+    chunkplan = plan.meta.fiber_queue_plans[orient]
+    worker_count = min(nworkers, length(chunkplan.ranges))
 
-    if P == 0
+    if worker_count <= 1 || Int(layout.nfibers) <= 1
         write_ptr = workspace.write_ptr
         @inbounds copyto!(write_ptr, 1, layout.first_offsets, 1, maxlen)
         scratch1 = workspace.scratch1
@@ -1914,20 +1665,42 @@ function _apply_lastdim_cycled_add!(destdata::Vector{ElT},
                                        axis_last, fib.last_refinement, ElT)
         end
     else
-        chunkplan = _get_fiber_chunk_plan!(plan, orient, P, ops, planvecs)
-        bufs = _get_fiber_chunk_buffers!(plan, length(chunkplan.ranges))
+        bufs = plan.fiber_workers
+        nextchunk = Threads.Atomic{Int}(1)
         srcdata = src.data
-        @sync for cid in 1:length(chunkplan.ranges)
-            rg = chunkplan.ranges[cid]
-            isempty(rg) && continue
-            rowptr = @view bufs.rowptr[:, cid]
-            copyto!(rowptr, @view chunkplan.startptrs[:, cid])
-            bufA = bufs.bufA[cid]
-            bufB = bufs.bufB[cid]
-            work = bufs.work[cid]
-            Threads.@spawn :default _apply_fiber_chunk_add!($destdata, $srcdata, $fibers, $rg, $rowptr,
-                                                            $ops, $planvecs, $axis_last,
-                                                            $bufA, $bufB, $work, $ElT)
+        ranges = chunkplan.ranges
+        startptrs = chunkplan.startptrs
+        nchunks = length(ranges)
+        @sync for wid in 1:worker_count
+            rowptr = @view bufs.rowptr[:, wid]
+            bufA = bufs.bufA[wid]
+            bufB = bufs.bufB[wid]
+            work = bufs.work[wid]
+            Threads.@spawn :default begin
+                destdata1 = $destdata
+                srcdata1 = $srcdata
+                fibers1 = $fibers
+                ranges1 = $ranges
+                startptrs1 = $startptrs
+                nextchunk1 = $nextchunk
+                nchunks1 = $nchunks
+                rowptr1 = $rowptr
+                ops1 = $ops
+                planvecs1 = $planvecs
+                axis_last1 = $axis_last
+                bufA1 = $bufA
+                bufB1 = $bufB
+                work1 = $work
+                ElT1 = $ElT
+                while true
+                    cid = Threads.atomic_add!(nextchunk1, 1)
+                    cid > nchunks1 && break
+                    copyto!(rowptr1, @view startptrs1[:, cid])
+                    _apply_fiber_chunk_add!(destdata1, srcdata1, fibers1, ranges1[cid], rowptr1,
+                                            ops1, planvecs1, axis_last1,
+                                            bufA1, bufB1, work1, ElT1)
+                end
+            end
         end
     end
 
@@ -1935,8 +1708,8 @@ function _apply_lastdim_cycled_add!(destdata::Vector{ElT},
 end
 
 """
-    apply_lastdim_cycled!(dest, src, grid, op, plan; parallel_width=_default_parallel_width())
-    apply_lastdim_cycled!(dest, src, grid, op; kwargs...)
+    apply_lastdim_cycled!(dest, src, grid, op, plan)
+    apply_lastdim_cycled!(dest, src, grid, op)
 
 Apply `op` along the last storage dimension and write the result in the next cyclic orientation.
 """
@@ -1944,94 +1717,82 @@ function apply_lastdim_cycled!(dest::OrientedCoeffs{D,ElT},
                                src::OrientedCoeffs{D,ElT},
                                grid::SparseGrid,
                                op::AbstractLineOp,
-                               plan::CyclicLayoutPlan{D,Ti,ElT};
-                               parallel_width::Int=_default_parallel_width()) where {D,Ti,ElT}
-    return _apply_lastdim_cycled!(dest, src, grid, op, plan, parallel_width)
+                               plan::CyclicLayoutPlan{D,Ti,ElT}) where {D,Ti,ElT}
+    return _apply_lastdim_cycled!(dest, src, grid, op, plan, plan.meta.pool)
 end
 
 """Convenience overload: build a temporary [`CyclicLayoutPlan`](@ref) and apply."""
 function apply_lastdim_cycled!(dest::OrientedCoeffs{D,ElT},
                                src::OrientedCoeffs{D,ElT},
                                grid::SparseGrid,
-                               op::AbstractLineOp; kwargs...) where {D,ElT}
+                               op::AbstractLineOp) where {D,ElT}
     plan = CyclicLayoutPlan(grid, ElT)
-    return apply_lastdim_cycled!(dest, src, grid, op, plan; kwargs...)
+    return apply_lastdim_cycled!(dest, src, grid, op, plan)
 end
 
 # ----------------------------------------------------------------------------
-# k-step cyclic rotations (last→front only)
+# k-step cyclic rotations (last-to-front only)
 
-@inline function _rank_index(it_dst::RecursiveLayoutIterator{D}, levels, locals) where {D}
-    I = it_dst.indexset
-    perm = it_dst.perm
-    caps = it_dst.refinement_caps
-    S = it_dst.subtree_count
-    Δs = it_dst.deltacounts
-    offset = 1
-    prefix = MVector{D,Int}(ntuple(_ -> 0, Val(D)))
-    @inbounds for dim in 1:D
-        pd = perm[dim]
-        rcur = Int(levels[pd])
-        i0 = Int(locals[pd])
-        prefix_sv = SVector{D,Int}(prefix)
-        for r in 0:(rcur - 1)
-            w = Δs[pd][r + 1]
-            w == 0 && continue
-            prefix_r = setindex(prefix_sv, r, pd)
-            offset += w * _subtree_size(S, dim + 1, prefix_r)
-        end
-        prefix[pd] = rcur
-        offset += i0 * _subtree_size(S, dim + 1, SVector{D,Int}(prefix))
-    end
-    return offset
-end
+"""
+    _cyclic_rotate_by!(dest, src, grid, k, plan, nworkers)
 
+Rotate `src` forward by `k` cyclic orientations and write the result into `dest`.
+
+For `k > 1`, the rotation is evaluated as repeated identity last-dimension
+sweeps so that it reuses the same queueing and scratch model as ordinary tensor
+application.
+"""
 function _cyclic_rotate_by!(dest::OrientedCoeffs{D,ElT},
                             src::OrientedCoeffs{D,ElT},
                             grid::SparseGrid,
                             k::Int,
                             plan::CyclicLayoutPlan{D,Ti,ElT},
-                            parallel_width::Int) where {D,Ti,ElT}
+                            nworkers::Int) where {D,Ti,ElT}
     kk = mod(k, D)
     kk == 0 && (copyto!(dest.data, src.data); return OrientedCoeffs(dest.data, src.perm))
+    src.data === dest.data && throw(ArgumentError("rotation requires distinct src and dest buffers when k != 0"))
 
-    perm_dst = cycle_last_to_front(src.perm, kk)
     orient_src = _orient_of_perm(src.perm)
-    orient_dst = _orient_of_perm(perm_dst)
-    (orient_src == 0 || orient_dst == 0) && throw(ArgumentError("non-cyclic perm in _cyclic_rotate_by!"))
+    orient_src == 0 && throw(ArgumentError("non-cyclic perm in _cyclic_rotate_by!"))
 
-    if kk == 1
-        return _apply_lastdim_cycled!(dest, src, grid, IdentityLineOp(), plan, parallel_width)
+    kk == 1 && return _apply_lastdim_cycled!(dest, src, grid, IdentityLineOp(), plan, nworkers)
+
+    workspace = plan.workspace
+    tmp = nothing
+    @inbounds for buf in (workspace.unidir_buf, workspace.work_buf, workspace.rot_buf)
+        if buf !== src.data && buf !== dest.data
+            tmp = buf
+            break
+        end
     end
+    tmp === nothing && throw(ArgumentError("rotation requires one temporary buffer distinct from src and dest"))
 
-    spec = grid.spec
-    I = spec.indexset
-    caps = refinement_caps(I)
-
-    deltac_src, subtree_src = _build_subtree_count(spec, src.perm, I)
-    deltac_dst, subtree_dst = _build_subtree_count(spec, perm_dst, I)
-    it_src = RecursiveLayoutIterator(spec.axes, I, src.perm, caps, deltac_src, subtree_src, subtree_src.total)
-    it_dst = RecursiveLayoutIterator(spec.axes, I, perm_dst, caps, deltac_dst, subtree_dst, subtree_dst.total)
-
-    i = 1
-    nxt = iterate(it_src)
-    @inbounds while nxt !== nothing
-        _, st = nxt
-        j = _rank_index(it_dst, st.levels, st.locals)
-        dest.data[j] = src.data[i]
-        i += 1
-        nxt = iterate(it_src, st)
+    current = src
+    nextbuf = isodd(kk) ? dest.data : tmp
+    @inbounds for _ in 1:kk
+        current = _apply_lastdim_cycled!(OrientedCoeffs(nextbuf, current.perm),
+                                         current,
+                                         grid,
+                                         IdentityLineOp(),
+                                         plan,
+                                         nworkers)
+        nextbuf = nextbuf === dest.data ? tmp : dest.data
     end
-
-    return OrientedCoeffs(dest.data, perm_dst)
+    return current
 end
 
+"""
+    _cyclic_rotate_by_add!(destdata, src, grid, k, plan, nworkers)
+
+Rotate `src` forward by `k` cyclic orientations and add the result into
+`destdata`.
+"""
 function _cyclic_rotate_by_add!(destdata::Vector{ElT},
                                 src::OrientedCoeffs{D,ElT},
                                 grid::SparseGrid,
                                 k::Int,
                                 plan::CyclicLayoutPlan{D,Ti,ElT},
-                                parallel_width::Int) where {D,Ti,ElT}
+                                nworkers::Int) where {D,Ti,ElT}
     kk = mod(k, D)
     if kk == 0
         @inbounds @simd for i in eachindex(src.data)
@@ -2040,99 +1801,65 @@ function _cyclic_rotate_by_add!(destdata::Vector{ElT},
         return OrientedCoeffs(destdata, src.perm)
     end
 
-    perm_dst = cycle_last_to_front(src.perm, kk)
     orient_src = _orient_of_perm(src.perm)
-    orient_dst = _orient_of_perm(perm_dst)
-    (orient_src == 0 || orient_dst == 0) && throw(ArgumentError("non-cyclic perm in _cyclic_rotate_by_add!"))
+    orient_src == 0 && throw(ArgumentError("non-cyclic perm in _cyclic_rotate_by_add!"))
 
-    if kk == 1
-        return _apply_lastdim_cycled_add!(destdata, src, grid, IdentityLineOp(), plan, parallel_width)
+    kk == 1 && return _apply_lastdim_cycled_add!(destdata, src, grid, IdentityLineOp(), plan, nworkers)
+
+    workspace = plan.workspace
+    tmpA = nothing
+    tmpB = nothing
+    @inbounds for buf in (workspace.unidir_buf, workspace.work_buf, workspace.rot_buf)
+        if buf !== src.data && buf !== destdata
+            if tmpA === nothing
+                tmpA = buf
+            elseif buf !== tmpA
+                tmpB = buf
+                break
+            end
+        end
     end
+    (tmpA === nothing || tmpB === nothing) &&
+        throw(ArgumentError("rotation-add requires two temporary buffers distinct from src and dest"))
 
-    spec = grid.spec
-    I = spec.indexset
-    caps = refinement_caps(I)
-
-    deltac_src, subtree_src = _build_subtree_count(spec, src.perm, I)
-    deltac_dst, subtree_dst = _build_subtree_count(spec, perm_dst, I)
-    it_src = RecursiveLayoutIterator(spec.axes, I, src.perm, caps, deltac_src, subtree_src, subtree_src.total)
-    it_dst = RecursiveLayoutIterator(spec.axes, I, perm_dst, caps, deltac_dst, subtree_dst, subtree_dst.total)
-
-    i = 1
-    nxt = iterate(it_src)
-    @inbounds while nxt !== nothing
-        _, st = nxt
-        j = _rank_index(it_dst, st.levels, st.locals)
-        destdata[j] += src.data[i]
-        i += 1
-        nxt = iterate(it_src, st)
+    current = src
+    nextbuf = tmpA
+    @inbounds for _ in 1:(kk - 1)
+        current = _apply_lastdim_cycled!(OrientedCoeffs(nextbuf, current.perm),
+                                         current,
+                                         grid,
+                                         IdentityLineOp(),
+                                         plan,
+                                         nworkers)
+        nextbuf = nextbuf === tmpA ? tmpB : tmpA
     end
-
-    return OrientedCoeffs(destdata, perm_dst)
+    return _apply_lastdim_cycled_add!(destdata, current, grid, IdentityLineOp(), plan, nworkers)
 end
 
-function _cyclic_rotate_by!(dest::OrientedCoeffs{D,ElT},
-                            src::OrientedCoeffs{D,ElT},
-                            grid::SparseGrid,
-                            k::Int,
-                            plan::CyclicLayoutPlan{D,Ti,ElT};
-                            parallel_width::Int=_default_parallel_width()) where {D,Ti,ElT}
-    return _cyclic_rotate_by!(dest, src, grid, k, plan, parallel_width)
-end
+"""
+    _cyclic_rotate_to!(dest, src, grid, perm_src, perm_dst, plan, nworkers)
 
+Rotate `src` from `perm_src` to `perm_dst` and write the result into `dest`.
+Both permutations must be cyclic orientations of the identity storage order.
+"""
 function _cyclic_rotate_to!(dest::Vector{ElT},
                             src::Vector{ElT},
                             grid::SparseGrid,
                             perm_src::SVector{D,Int},
                             perm_dst::SVector{D,Int},
                             plan::CyclicLayoutPlan{D,Ti,ElT},
-                            parallel_width::Int) where {D,Ti,ElT}
+                            nworkers::Int) where {D,Ti,ElT}
     perm_src == perm_dst && (copyto!(dest, src); return dest)
+    src === dest && throw(ArgumentError("rotation requires distinct src and dest buffers when perm_src != perm_dst"))
+
     osrc = _orient_of_perm(perm_src)
     odst = _orient_of_perm(perm_dst)
     (osrc == 0 || odst == 0) && throw(ArgumentError("non-cyclic perm in _cyclic_rotate_to!"))
 
     src_or = OrientedCoeffs(src, perm_src)
     dst_or = OrientedCoeffs(dest, perm_src)
-    _cyclic_rotate_by!(dst_or, src_or, grid, mod(odst - osrc, D), plan, parallel_width)
+    _cyclic_rotate_by!(dst_or, src_or, grid, mod(odst - osrc, D), plan, nworkers)
     return dest
-end
-
-function _cyclic_rotate_to!(dest::Vector{ElT},
-                            src::Vector{ElT},
-                            grid::SparseGrid,
-                            perm_src::SVector{D,Int},
-                            perm_dst::SVector{D,Int},
-                            plan::CyclicLayoutPlan{D,Ti,ElT};
-                            parallel_width::Int=_default_parallel_width()) where {D,Ti,ElT}
-    return _cyclic_rotate_to!(dest, src, grid, perm_src, perm_dst, plan, parallel_width)
-end
-
-@inline _perm_id(::Val{D}) where {D} = SVector{D,Int}(ntuple(identity, D))
-
-@inline function _cyclic_perm_with_front(::Val{D}, d::Int) where {D}
-    1 <= d <= D || throw(ArgumentError("front dimension must satisfy 1 <= d <= $D"))
-    return cycle_last_to_front(_perm_id(Val(D)), mod(1 - d, D))
-end
-
-# Choose execution mode and omission dimension for UpDown tensor sweeps.
-
-@inline function _rotation_cost(srcperm::SVector{D,Int}, k::Int, identity_stats, N::Int) where {D}
-    kk = mod(k, D)
-    if kk == 0
-        return (serial=0.0, threaded=0.0)
-    elseif kk == 1
-        return identity_stats[srcperm[end]]
-    else
-        c = Float64(N)
-        return (serial=c, threaded=c)
-    end
-end
-
-@inline function _term_parallel_workers(nterms::Int, parallel_width::Int, bytes_per_worker::Int)
-    return min(nterms,
-               parallel_width,
-               max(1, fld(_TERM_PARALLEL_WORKSPACE_BUDGET, max(bytes_per_worker, 1))))
 end
 
 function _collect_term_masks(split_mask::UInt64, ::Val{D}) where {D}
@@ -2146,7 +1873,7 @@ function _collect_term_masks(split_mask::UInt64, ::Val{D}) where {D}
         bit = 0
         for d in 1:D
             dbit = UInt64(1) << (d - 1)
-            (split_mask & dbit) == 0 && continue
+            ((split_mask >> (d - 1)) & 0x1) == 0x0 && continue
             ((tidx >> bit) & 0x1) == 0x1 && (term_mask |= dbit)
             bit += 1
         end
@@ -2155,111 +1882,21 @@ function _collect_term_masks(split_mask::UInt64, ::Val{D}) where {D}
     return term_masks
 end
 
-function _estimate_updown_term_cost(op::UpDownTensorOp{D},
-                                    omit_dim::Int,
-                                    term_mask::UInt64,
-                                    perm0::SVector{D,Int},
-                                    full_stats,
-                                    lower_stats,
-                                    upper_stats,
-                                    identity_stats,
-                                    N::Int) where {D}
-    serial = 0.0
-    threaded = 0.0
-    perm = perm0
-    steps_done = 0
-
-    while steps_done < D
-        t = 0
-        @inbounds for j in 0:(D - steps_done - 1)
-            pd = perm[D - j]
-            _updown_phase1_lineop(op, pd, omit_dim, term_mask) isa IdentityLineOp || break
-            t += 1
-        end
-
-        if t > 0
-            s = _rotation_cost(perm, t, identity_stats, N)
-            serial += s.serial
-            threaded += s.threaded
-            perm = cycle_last_to_front(perm, t)
-            steps_done += t
-            continue
-        end
-
-        phys = perm[end]
-        s = if phys == omit_dim
-            full_stats[phys]
-        elseif iszero(op.lower[phys])
-            upper_stats[phys]
-        elseif iszero(op.upper[phys])
-            identity_stats[phys]
-        elseif ((term_mask >> (phys - 1)) & 0x1) == 0x1
-            upper_stats[phys]
-        else
-            identity_stats[phys]
-        end
-        serial += s.serial
-        threaded += s.threaded
-        perm = cycle_last_to_front(perm)
-        steps_done += 1
-    end
-
-    perm = perm0
-    steps_done = 0
-    while steps_done < D
-        t = 0
-        @inbounds for j in 0:(D - steps_done - 1)
-            pd = perm[D - j]
-            _updown_phase2_lineop(op, pd, omit_dim, term_mask) isa IdentityLineOp || break
-            t += 1
-        end
-
-        if t > 0
-            s = _rotation_cost(perm, t, identity_stats, N)
-            serial += s.serial
-            threaded += s.threaded
-            perm = cycle_last_to_front(perm, t)
-            steps_done += t
-            continue
-        end
-
-        phys = perm[end]
-        s = if phys == omit_dim
-            identity_stats[phys]
-        elseif iszero(op.lower[phys])
-            identity_stats[phys]
-        elseif iszero(op.upper[phys])
-            lower_stats[phys]
-        elseif ((term_mask >> (phys - 1)) & 0x1) == 0x0
-            lower_stats[phys]
-        else
-            identity_stats[phys]
-        end
-        serial += s.serial
-        threaded += s.threaded
-        perm = cycle_last_to_front(perm)
-        steps_done += 1
-    end
-
-    return serial, threaded
-end
-
 @inline function _updown_phase1_lineop(op::UpDownTensorOp{D}, d::Int, omit_dim::Int, term_mask::UInt64) where {D}
     d == omit_dim && return op.full[d]
-    L = op.lower[d]
-    U = op.upper[d]
-    iszero(L) && return U
-    iszero(U) && return IdentityLineOp()
-    return ((term_mask >> (d - 1)) & 0x1) == 0x1 ? U : IdentityLineOp()
+    mode = op.mode[d]
+    mode == _UPDOWN_UPPER_ONLY && return op.upper[d]
+    mode == _UPDOWN_SPLIT && return ((term_mask >> (d - 1)) & 0x1) == 0x1 ? op.upper[d] : IdentityLineOp()
+    mode == _UPDOWN_ZERO && return ZeroLineOp()
+    return IdentityLineOp()
 end
 
 @inline function _updown_phase2_lineop(op::UpDownTensorOp{D}, d::Int, omit_dim::Int, term_mask::UInt64) where {D}
     d == omit_dim && return IdentityLineOp()
-    L = op.lower[d]
-    U = op.upper[d]
-    iszero(L) && return IdentityLineOp()
-    iszero(U) && return L
-    return ((term_mask >> (d - 1)) & 0x1) == 0x0 ? L : IdentityLineOp()
+    mode = op.mode[d]
+    mode == _UPDOWN_LOWER_ONLY && return op.lower[d]
+    mode == _UPDOWN_SPLIT && return ((term_mask >> (d - 1)) & 0x1) == 0x0 ? op.lower[d] : IdentityLineOp()
+    return IdentityLineOp()
 end
 
 function _apply_updown_term_mask_add!(acc::Vector{ElT},
@@ -2270,8 +1907,8 @@ function _apply_updown_term_mask_add!(acc::Vector{ElT},
                                       plan::CyclicLayoutPlan{D,Ti,ElT},
                                       omit_dim::Int,
                                       term_mask::UInt64,
-                                      parallel_width::Int) where {D,Ti,ElT}
-    parallel_width = max(Int(parallel_width), 1)
+                                      nworkers::Int) where {D,Ti,ElT}
+    nworkers = max(Int(nworkers), 1)
     bufA = plan.workspace.work_buf
     bufB = plan.workspace.unidir_buf
     src = OrientedCoeffs(xbuf, perm0)
@@ -2288,7 +1925,7 @@ function _apply_updown_term_mask_add!(acc::Vector{ElT},
 
         if t > 0
             destbuf = src.data === bufA ? bufB : bufA
-            src = _cyclic_rotate_by!(OrientedCoeffs(destbuf, src.perm), src, grid, t, plan, parallel_width)
+            src = _cyclic_rotate_by!(OrientedCoeffs(destbuf, src.perm), src, grid, t, plan, nworkers)
             steps_done += t
             continue
         end
@@ -2297,7 +1934,7 @@ function _apply_updown_term_mask_add!(acc::Vector{ElT},
         destbuf = src.data === bufA ? bufB : bufA
         src = _apply_lastdim_cycled!(OrientedCoeffs(destbuf, src.perm), src, grid,
                                      _updown_phase1_lineop(op, phys, omit_dim, term_mask),
-                                     plan, parallel_width)
+                                     plan, nworkers)
         steps_done += 1
     end
 
@@ -2313,11 +1950,11 @@ function _apply_updown_term_mask_add!(acc::Vector{ElT},
 
         if t > 0
             if steps_done + t == D
-                _cyclic_rotate_by_add!(acc, src, grid, t, plan, parallel_width)
+                _cyclic_rotate_by_add!(acc, src, grid, t, plan, nworkers)
                 return acc
             end
             destbuf = src.data === bufA ? bufB : bufA
-            src = _cyclic_rotate_by!(OrientedCoeffs(destbuf, src.perm), src, grid, t, plan, parallel_width)
+            src = _cyclic_rotate_by!(OrientedCoeffs(destbuf, src.perm), src, grid, t, plan, nworkers)
             steps_done += t
             continue
         end
@@ -2325,11 +1962,11 @@ function _apply_updown_term_mask_add!(acc::Vector{ElT},
         phys = perm[end]
         lop = _updown_phase2_lineop(op, phys, omit_dim, term_mask)
         if steps_done + 1 == D
-            _apply_lastdim_cycled_add!(acc, src, grid, lop, plan, parallel_width)
+            _apply_lastdim_cycled_add!(acc, src, grid, lop, plan, nworkers)
             return acc
         end
         destbuf = src.data === bufA ? bufB : bufA
-        src = _apply_lastdim_cycled!(OrientedCoeffs(destbuf, src.perm), src, grid, lop, plan, parallel_width)
+        src = _apply_lastdim_cycled!(OrientedCoeffs(destbuf, src.perm), src, grid, lop, plan, nworkers)
         steps_done += 1
     end
 
@@ -2344,13 +1981,20 @@ function _apply_updown_fiber!(ybuf::Vector{ElT},
                               plan::CyclicLayoutPlan{D,Ti,ElT},
                               omit_dim::Int,
                               term_masks::Vector{UInt64},
-                              parallel_width::Int) where {D,Ti,ElT}
+                              pool::Int) where {D,Ti,ElT}
+    fill!(ybuf, zero(ElT))
     @inbounds for term_mask in term_masks
-        _apply_updown_term_mask_add!(ybuf, xbuf, perm0, grid, op, plan, omit_dim, term_mask, parallel_width)
+        _apply_updown_term_mask_add!(ybuf, xbuf, perm0, grid, op, plan, omit_dim, term_mask, pool)
     end
     return ybuf
 end
 
+"""
+    _apply_updown_term!(ybuf, xbuf, perm0, grid, op, plan, omit_dim, term_masks, pool)
+
+Apply the UpDown split terms with a dynamic term queue and a striped reduction of
+worker-local accumulators.
+"""
 function _apply_updown_term!(ybuf::Vector{ElT},
                              xbuf::Vector{ElT},
                              perm0::SVector{D,Int},
@@ -2359,31 +2003,51 @@ function _apply_updown_term!(ybuf::Vector{ElT},
                              plan::CyclicLayoutPlan{D,Ti,ElT},
                              omit_dim::Int,
                              term_masks::Vector{UInt64},
-                             term_ranges::Vector{UnitRange{Int}}) where {D,Ti,ElT}
-    term_workers = length(term_ranges)
-    workspace = plan.workspace
-    N = length(workspace.work_buf)
-    maxlen = length(workspace.write_ptr)
-    workers = get(plan.term_workspaces, term_workers, nothing)
-    if workers === nothing ||
-       length(workers) != term_workers ||
-       any(length(ws.write_ptr) != maxlen ||
-           length(ws.scratch1) != maxlen ||
-           length(ws.scratch2) != maxlen ||
-           length(ws.scratch3) != maxlen ||
-           length(ws.unidir_buf) != N ||
-           length(ws.work_buf) != N ||
-           length(ws.acc_buf) != N ||
-           length(ws.x_buf) != 0 for ws in workers)
-        workers = [CyclicLayoutWorkspace(Ti, ElT, maxlen, N; xlen=0) for _ in 1:term_workers]
-        plan.term_workspaces[term_workers] = workers
+                             pool::Int) where {D,Ti,ElT}
+    term_workers = min(max(Int(pool), 1), length(term_masks))
+    term_workers == 1 && begin
+        fill!(ybuf, zero(ElT))
+        @inbounds for term_mask in term_masks
+            _apply_updown_term_mask_add!(ybuf, xbuf, perm0, grid, op, plan, omit_dim, term_mask, 1)
+        end
+        return ybuf
     end
 
+    caps = plan.meta.refinement_caps
+    @inbounds for d in 1:D
+        mode = op.mode[d]
+        mode == _UPDOWN_IDENTITY && continue
+        mode == _UPDOWN_ZERO && continue
+        axis = grid.spec.axes[d]
+        cap = Int(caps[d])
+        if d == omit_dim
+            for oi in lineops(op.full[d])
+                _get_lineplanvec!(plan.meta.lineplans, oi, axis, cap, ElT)
+            end
+        elseif mode == _UPDOWN_SPLIT
+            for oi in lineops(op.lower[d])
+                _get_lineplanvec!(plan.meta.lineplans, oi, axis, cap, ElT)
+            end
+            for oi in lineops(op.upper[d])
+                _get_lineplanvec!(plan.meta.lineplans, oi, axis, cap, ElT)
+            end
+        elseif mode == _UPDOWN_LOWER_ONLY
+            for oi in lineops(op.lower[d])
+                _get_lineplanvec!(plan.meta.lineplans, oi, axis, cap, ElT)
+            end
+        elseif mode == _UPDOWN_UPPER_ONLY
+            for oi in lineops(op.upper[d])
+                _get_lineplanvec!(plan.meta.lineplans, oi, axis, cap, ElT)
+            end
+        end
+    end
+
+    workers = plan.term_workspaces
+    nterms = length(term_masks)
+    nextidx = Threads.Atomic{Int}(1)
     @sync for wid in 1:term_workers
-        rg = term_ranges[wid]
-        isempty(rg) && continue
         local_workspace = workers[wid]
-        local_plan = CyclicLayoutPlan{D,Ti,ElT}(plan.meta, local_workspace, plan.fiber_chunk_buffers, plan.term_workspaces)
+        local_plan = CyclicLayoutPlan{D,Ti,ElT}(plan.meta, local_workspace, plan.fiber_workers, plan.term_workspaces)
         local_acc = local_workspace.acc_buf
         fill!(local_acc, zero(ElT))
         Threads.@spawn :default begin
@@ -2391,21 +2055,42 @@ function _apply_updown_term!(ybuf::Vector{ElT},
             op1 = $op
             perm1 = $perm0
             omit1 = $omit_dim
-            rg1 = $rg
             xdata = $xbuf
             term_masks1 = $term_masks
+            nterms1 = $nterms
+            nextidx1 = $nextidx
             local_plan1 = $local_plan
             local_acc1 = $local_acc
-            for tidx in rg1
+            while true
+                tidx = Threads.atomic_add!(nextidx1, 1)
+                tidx > nterms1 && break
                 _apply_updown_term_mask_add!(local_acc1, xdata, perm1, grid1, op1, local_plan1, omit1, term_masks1[tidx], 1)
             end
         end
     end
 
-    @inbounds for wid in 1:term_workers
-        local_acc = workers[wid].acc_buf
-        for i in eachindex(ybuf)
-            ybuf[i] += local_acc[i]
+    N = length(ybuf)
+    stripe = cld(N, term_workers)
+    @sync for rid in 1:term_workers
+        lo = (rid - 1) * stripe + 1
+        lo > N && break
+        hi = min(N, rid * stripe)
+        Threads.@spawn :default begin
+            ybuf1 = $ybuf
+            workers1 = $workers
+            term_workers1 = $term_workers
+            lo1 = $lo
+            hi1 = $hi
+            base_acc = workers1[1].acc_buf
+            @inbounds @simd for i in lo1:hi1
+                ybuf1[i] = base_acc[i]
+            end
+            @inbounds for wid in 2:term_workers1
+                local_acc = workers1[wid].acc_buf
+                @simd for i in lo1:hi1
+                    ybuf1[i] += local_acc[i]
+                end
+            end
         end
     end
     return ybuf
@@ -2415,17 +2100,20 @@ end
 # Tensor (dimension-wise) unidirectional application
 
 """
-    apply_unidirectional!(u, grid, op, plan; parallel_width=_default_parallel_width())
-    apply_unidirectional!(u, grid, op; kwargs...)
+    _apply_tensor_sweep!(u, grid, op, plan, nworkers)
 
-Apply a line, tensor, composite, or UpDown operator to `u` using cyclic unidirectional sweeps.
+Apply one [`TensorOp`](@ref) sweep to `u` using cyclic rotations and
+last-dimension kernels.
+
+`nworkers` is an internal worker budget used to suppress nested threading when a
+larger outer parallel region already exists.
 """
-function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
-                               grid::SparseGrid,
-                               op::AbstractTensorOp{D},
-                               plan::CyclicLayoutPlan{D,Ti,ElT},
-                               parallel_width::Int) where {D,Ti,ElT}
-    parallel_width = max(Int(parallel_width), 1)
+function _apply_tensor_sweep!(u::OrientedCoeffs{D,ElT},
+                              grid::SparseGrid,
+                              op::TensorOp{D},
+                              plan::CyclicLayoutPlan{D,Ti,ElT},
+                              nworkers::Int) where {D,Ti,ElT}
+    nworkers = clamp(Int(nworkers), 1, plan.meta.pool)
     buf = OrientedCoeffs(plan.workspace.unidir_buf, u.perm)
     src = u
     dest = buf
@@ -2442,7 +2130,7 @@ function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
         end
 
         if t > 0
-            dest = _cyclic_rotate_by!(dest, src, grid, t, plan, parallel_width)
+            dest = _cyclic_rotate_by!(dest, src, grid, t, plan, nworkers)
             src, dest = dest, src
             steps_done += t
             continue
@@ -2450,7 +2138,7 @@ function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
 
         phys = perm[end]
         lop = lineop(op, phys)
-        dest = _apply_lastdim_cycled!(dest, src, grid, lop, plan, parallel_width)
+        dest = _apply_lastdim_cycled!(dest, src, grid, lop, plan, nworkers)
         src, dest = dest, src
         steps_done += 1
     end
@@ -2459,208 +2147,117 @@ function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
     return u
 end
 
-function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
-                               grid::SparseGrid,
-                               op::AbstractTensorOp{D},
-                               plan::CyclicLayoutPlan{D,Ti,ElT};
-                               parallel_width::Int=_default_parallel_width()) where {D,Ti,ElT}
-    return apply_unidirectional!(u, grid, op, plan, parallel_width)
-end
+"""
+    _apply_tensor_chain!(u, grid, op, plan, nworkers)
 
-function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
-                               grid::SparseGrid,
-                               op::CompositeTensorOp{D},
-                               plan::CyclicLayoutPlan{D,Ti,ElT},
-                               parallel_width::Int) where {D,Ti,ElT}
+Apply each tensor sweep stored in a [`CompositeTensorOp`](@ref) sequentially.
+"""
+function _apply_tensor_chain!(u::OrientedCoeffs{D,ElT},
+                              grid::SparseGrid,
+                              op::CompositeTensorOp{D},
+                              plan::CyclicLayoutPlan{D,Ti,ElT},
+                              nworkers::Int) where {D,Ti,ElT}
+    nworkers = clamp(Int(nworkers), 1, plan.meta.pool)
     for sweep in op.ops
-        apply_unidirectional!(u, grid, sweep, plan, parallel_width)
+        _apply_tensor_sweep!(u, grid, sweep, plan, nworkers)
     end
     return u
 end
 
-function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
-                               grid::SparseGrid,
-                               op::CompositeTensorOp{D},
-                               plan::CyclicLayoutPlan{D,Ti,ElT};
-                               parallel_width::Int=_default_parallel_width()) where {D,Ti,ElT}
-    return apply_unidirectional!(u, grid, op, plan, parallel_width)
-end
+"""
+    _apply_updown!(u, grid, op, plan)
 
-function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
-                               grid::SparseGrid,
-                               op::AbstractLineOp,
-                               plan::CyclicLayoutPlan{D,Ti,ElT},
-                               parallel_width::Int) where {D,Ti,ElT}
-    return apply_unidirectional!(u, grid, tensorize(op, Val(D)), plan, parallel_width)
-end
-
-function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
-                               grid::SparseGrid,
-                               op::AbstractLineOp,
-                               plan::CyclicLayoutPlan{D,Ti,ElT};
-                               parallel_width::Int=_default_parallel_width()) where {D,Ti,ElT}
-    return apply_unidirectional!(u, grid, op, plan, parallel_width)
-end
-
-function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
-                               grid::SparseGrid,
-                               op::UpDownTensorOp{D},
-                               plan::CyclicLayoutPlan{D,Ti,ElT},
-                               parallel::Symbol,
-                               parallel_width::Int) where {D,Ti,ElT}
-    parallel === :auto || parallel === :fiber || parallel === :term ||
-        throw(ArgumentError("parallel must be :auto, :fiber, or :term; got $parallel"))
-
-    parallel_width = max(Int(parallel_width), 1)
-    idperm = _perm_id(Val(D))
+Apply an [`UpDownTensorOp`](@ref), selecting fiber-level or term-level
+parallelism from the effective number of split terms.
+"""
+function _apply_updown!(u::OrientedCoeffs{D,ElT},
+                        grid::SparseGrid,
+                        op::UpDownTensorOp{D},
+                        plan::CyclicLayoutPlan{D,Ti,ElT}) where {D,Ti,ElT}
+    pool = plan.meta.pool
+    idperm = SVector{D,Int}(ntuple(identity, Val(D)))
     u.perm == idperm || throw(ArgumentError("UpDownTensorOp expects u.perm == identity; got $(u.perm)"))
+    op.has_zero && return (fill!(u.data, zero(ElT)); u)
 
-    N = length(plan.workspace.work_buf)
-    maxlen = length(plan.workspace.write_ptr)
-    bytes_per_worker = max(sizeof(Ti) * maxlen + sizeof(ElT) * (3 * maxlen + 3 * N), 1)
-
-    identity_stats = ntuple(d -> begin
-        axis = grid.spec.axes[d]
-        cap = Int(plan.meta.refinement_caps[d])
-        layout = plan.meta.layouts[_orient_for_lastdim(Val(D), d)]
-        _sweep_cost_stats(layout, axis, cap, IdentityLineOp(), plan.meta.lineplans, ElT, parallel_width)
-    end, Val(D))
-    full_stats = ntuple(d -> begin
-        axis = grid.spec.axes[d]
-        cap = Int(plan.meta.refinement_caps[d])
-        layout = plan.meta.layouts[_orient_for_lastdim(Val(D), d)]
-        _sweep_cost_stats(layout, axis, cap, op.full[d], plan.meta.lineplans, ElT, parallel_width)
-    end, Val(D))
-    lower_stats = ntuple(d -> begin
-        axis = grid.spec.axes[d]
-        cap = Int(plan.meta.refinement_caps[d])
-        layout = plan.meta.layouts[_orient_for_lastdim(Val(D), d)]
-        _sweep_cost_stats(layout, axis, cap, op.lower[d], plan.meta.lineplans, ElT, parallel_width)
-    end, Val(D))
-    upper_stats = ntuple(d -> begin
-        axis = grid.spec.axes[d]
-        cap = Int(plan.meta.refinement_caps[d])
-        layout = plan.meta.layouts[_orient_for_lastdim(Val(D), d)]
-        _sweep_cost_stats(layout, axis, cap, op.upper[d], plan.meta.lineplans, ElT, parallel_width)
-    end, Val(D))
-
-    candidate_omits = op.omit_dim != 0 ? Int[op.omit_dim] : Int[0]
-    if op.omit_dim == 0
-        @inbounds for d in 1:D
-            ((op.split_mask >> (d - 1)) & 0x1) == 0x1 && push!(candidate_omits, d)
-        end
-    end
-
-    best_time = Inf
-    best_mode = :fiber
-    best_omit = 0
-    best_perm0 = idperm
-    best_term_masks = UInt64[]
-    best_term_workers = 1
-    best_term_costs = Float64[]
-
-    for omit_dim in candidate_omits
-        perm0 = omit_dim == 0 ? idperm : _cyclic_perm_with_front(Val(D), omit_dim)
-        split_mask = omit_dim == 0 ? op.split_mask : (op.split_mask & ~(UInt64(1) << (omit_dim - 1)))
-        nbits = count_ones(split_mask)
-        if nbits >= Sys.WORD_SIZE - 1
-            op.omit_dim == omit_dim && throw(ArgumentError("too many split terms for UpDownTensorOp: nsplit=$nbits"))
-            continue
-        end
-        term_masks = _collect_term_masks(split_mask, Val(D))
-        nterms = length(term_masks)
-        term_workers = _term_parallel_workers(nterms, parallel_width, bytes_per_worker)
-
-        setup = _rotation_cost(idperm, mod(_orient_of_perm(perm0) - 1, D), identity_stats, N)
-        teardown = _rotation_cost(perm0, mod(1 - _orient_of_perm(perm0), D), identity_stats, N)
-        fiber_time = setup.threaded + teardown.threaded
-        term_costs = Vector{Float64}(undef, nterms)
-        @inbounds for i in eachindex(term_masks)
-            serial_cost, fiber_cost = _estimate_updown_term_cost(op, omit_dim, term_masks[i], perm0,
-                                                                 full_stats, lower_stats, upper_stats,
-                                                                 identity_stats, N)
-            term_costs[i] = serial_cost
-            fiber_time += fiber_cost
-        end
-
-        term_time = Inf
-        if parallel === :term || (parallel === :auto && term_workers > 1 && nterms > 1)
-            if term_workers > 1
-                term_ranges = _partition_ranges_by_weight(term_costs, term_workers)
-                term_time = 0.0
-                @inbounds for rg in term_ranges
-                    load = 0.0
-                    for i in rg
-                        load += term_costs[i]
-                    end
-                    term_time = max(term_time, load)
-                end
-                term_time += Float64(N * term_workers)
-            else
-                term_time = sum(term_costs)
-            end
-            term_time += setup.threaded + teardown.threaded
-        end
-
-        cand_mode = parallel === :term ? :term : :fiber
-        cand_time = parallel === :term ? term_time : fiber_time
-        if parallel === :auto && term_time < fiber_time
-            cand_mode = :term
-            cand_time = term_time
-        end
-
-        if cand_time < best_time
-            best_time = cand_time
-            best_mode = cand_mode
-            best_omit = omit_dim
-            best_perm0 = perm0
-            best_term_masks = term_masks
-            best_term_workers = term_workers
-            best_term_costs = term_costs
-        end
-    end
-
-    isfinite(best_time) || throw(ArgumentError("failed to choose an UpDownTensorOp execution plan"))
-
-    xbuf = plan.workspace.x_buf
-    if best_perm0 == idperm
-        copyto!(xbuf, u.data)
+    omit_eff = if op.omit_dim == 0
+        0
+    elseif ((op.split_mask >> (op.omit_dim - 1)) & 0x1) == 0x1
+        op.omit_dim
     else
-        _cyclic_rotate_to!(xbuf, u.data, grid, idperm, best_perm0, plan, parallel_width)
+        0
+    end
+    perm0 = omit_eff == 0 ? idperm : cycle_last_to_front(idperm, mod(1 - omit_eff, D))
+    split_mask = omit_eff == 0 ? op.split_mask : (op.split_mask & ~(UInt64(1) << (omit_eff - 1)))
+    term_masks = _collect_term_masks(split_mask, Val(D))
+    nterms = length(term_masks)
+    use_term = pool > 1 && 2 * nterms >= pool
+
+    xdata = if perm0 == idperm
+        u.data
+    else
+        xbuf = plan.workspace.x_buf
+        _cyclic_rotate_to!(xbuf, u.data, grid, idperm, perm0, plan, pool)
+        xbuf
     end
 
     ybuf = plan.workspace.acc_buf
-    fill!(ybuf, zero(ElT))
-
-    if best_mode === :term && best_term_workers > 1
-        term_ranges = _partition_ranges_by_weight(best_term_costs, best_term_workers)
-        _apply_updown_term!(ybuf, xbuf, best_perm0, grid, op, plan, best_omit, best_term_masks, term_ranges)
-    elseif best_mode === :term
-        _apply_updown_fiber!(ybuf, xbuf, best_perm0, grid, op, plan, best_omit, best_term_masks, 1)
+    if use_term
+        _apply_updown_term!(ybuf, xdata, perm0, grid, op, plan, omit_eff, term_masks, pool)
     else
-        _apply_updown_fiber!(ybuf, xbuf, best_perm0, grid, op, plan, best_omit, best_term_masks, parallel_width)
+        _apply_updown_fiber!(ybuf, xdata, perm0, grid, op, plan, omit_eff, term_masks, pool)
     end
 
-    if best_perm0 == idperm
+    if perm0 == idperm
         copyto!(u.data, ybuf)
     else
-        _cyclic_rotate_to!(u.data, ybuf, grid, best_perm0, idperm, plan, parallel_width)
+        _cyclic_rotate_to!(u.data, ybuf, grid, perm0, idperm, plan, pool)
     end
     return u
+end
+
+"""
+    apply_unidirectional!(u, grid, op, plan)
+    apply_unidirectional!(u, grid, op)
+
+Apply a line, tensor, composite, or UpDown operator to `u` using cyclic
+unidirectional sweeps.
+
+For [`UpDownTensorOp`](@ref), the backend is chosen automatically from the
+number of effective split terms: if `Threads.threadpoolsize(:default) > 1` and
+`2*nterms >= pool`, term-level parallelism is used; otherwise fiber-level
+parallelism is used.
+"""
+function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
+                               grid::SparseGrid,
+                               op::TensorOp{D},
+                               plan::CyclicLayoutPlan{D,Ti,ElT}) where {D,Ti,ElT}
+    return _apply_tensor_sweep!(u, grid, op, plan, plan.meta.pool)
+end
+
+function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
+                               grid::SparseGrid,
+                               op::CompositeTensorOp{D},
+                               plan::CyclicLayoutPlan{D,Ti,ElT}) where {D,Ti,ElT}
+    return _apply_tensor_chain!(u, grid, op, plan, plan.meta.pool)
+end
+
+function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
+                               grid::SparseGrid,
+                               op::AbstractLineOp,
+                               plan::CyclicLayoutPlan{D,Ti,ElT}) where {D,Ti,ElT}
+    return _apply_tensor_sweep!(u, grid, tensorize(op, Val(D)), plan, plan.meta.pool)
 end
 
 function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
                                grid::SparseGrid,
                                op::UpDownTensorOp{D},
-                               plan::CyclicLayoutPlan{D,Ti,ElT};
-                               parallel::Symbol=:auto,
-                               parallel_width::Int=_default_parallel_width()) where {D,Ti,ElT}
-    return apply_unidirectional!(u, grid, op, plan, parallel, parallel_width)
+                               plan::CyclicLayoutPlan{D,Ti,ElT}) where {D,Ti,ElT}
+    return _apply_updown!(u, grid, op, plan)
 end
 
 function apply_unidirectional!(u::OrientedCoeffs{D,ElT},
                                grid::SparseGrid,
-                               op; kwargs...) where {D,ElT}
+                               op) where {D,ElT}
     plan = CyclicLayoutPlan(grid, ElT)
-    return apply_unidirectional!(u, grid, op, plan; kwargs...)
+    return apply_unidirectional!(u, grid, op, plan)
 end

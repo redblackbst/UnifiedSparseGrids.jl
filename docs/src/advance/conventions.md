@@ -52,7 +52,7 @@ For local-support dyadic bases such as `HatBasis()` and
 > Boundary degrees of freedom exist if and only if boundary points exist.
 
 So Dirichlet-style discretizations are typically expressed by choosing an axis
-family with `endpoints=:none`, not by switching to a separate “interior-only”
+family with `endpoints=:none`, not by switching to a separate "interior-only"
 basis type.
 
 ## Axis families vs. index sets
@@ -126,6 +126,24 @@ where:
 
 The function should be a top-level function, not a closure.
 
+The contract is:
+
+- `LineDiagonalOp(f)`: `f(n, T)` returns the diagonal data itself, as a
+  vector-like container of length `n`.
+- `LineBandedOp(f)`: `f(n, T)` returns a square
+  `BandedMatrices.AbstractBandedMatrix` of size `n × n`. The recommended
+  concrete return type is `BandedMatrix`.
+
+The current implementation caches only the largest-level object and constructs
+smaller levels by taking prefixes:
+
+- `LineDiagonalOp`: the first `m` entries `d[1:m]`,
+- `LineBandedOp`: the leading `m × m` principal banded view.
+
+So both families must be **prefix-compatible** across `n`: for every smaller
+size `m`, the object returned by `f(m, T)` must agree with the corresponding
+prefix of `f(n, T)` built at the largest cached size.
+
 ## Thread-safety contract for line plans
 
 `lineplan(op, axis, rmax, T)` returns a plan vector `planvec`, and the unidirectional engine
@@ -139,5 +157,6 @@ The project assumes the following contract:
 - Plans must not own mutable scratch buffers (no internal `work`, `tmp`, etc.).
 - All scratch memory is supplied by the caller via the `work` argument of `apply_line!`.
 
-This enables safe multithreading: plans can be shared across threads, and only per-thread
-scratch buffers are needed.
+This enables safe multithreading: plans can be shared across inner worker tasks, and only
+caller-owned scratch buffers are needed during application. For the execution backends,
+automatic backend selection, and workspace ownership model, see [Multi-threading](@ref).

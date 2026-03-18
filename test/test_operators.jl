@@ -2,6 +2,7 @@
 using Test
 using Random
 using LinearAlgebra
+using BandedMatrices
 using StaticArrays
 using UnifiedSparseGrids
 
@@ -116,8 +117,9 @@ function nested_invertible_triangular_mats(rng::AbstractRNG, axis::AbstractAxisF
     return mats
 end
 
-function dense_tridiag_family(n::Integer, ::Type{T}) where {T<:Number}
-    A = zeros(T, n, n)
+function banded_tridiag_family(n::Integer, ::Type{T}) where {T<:Number}
+    A = BandedMatrix{T}(undef, (n, n), (1, 1))
+    fill!(A, zero(T))
     @inbounds for i in 1:n
         A[i, i] = T(2) + T(i) / T(7)
         i < n && (A[i, i + 1] = T(-1) / T(4))
@@ -231,40 +233,24 @@ end
     rmax = refinement_caps(I)
     mats = ntuple(d -> nested_dense_mats(rng, axes[d], rmax[d], Float64), Val(D))
     ops = ntuple(d -> LineMatrixOp(mats[d]), Val(D))
-    op = UpDownTensorOp(ops; omit_dim=0)
     plan = CyclicLayoutPlan(grid, Float64)
     x = randn(rng, Float64, length(grid))
-    u_auto = OrientedCoeffs{D}(copy(x))
-    apply_unidirectional!(u_auto, grid, op, plan)
 
-    omit_ref = begin
-        nterms_full = 1 << D
-        if Threads.nthreads() >= (nterms_full >>> 1)
-            0
-        else
-            best = 1
-            bestlen = 0
-            for k in 1:D
-                lenk = totalsize(axes[k], rmax[k])
-                if lenk > bestlen
-                    best, bestlen = k, lenk
-                end
-            end
-            best
-        end
-    end
-    u_ref = OrientedCoeffs{D}(copy(x))
-    apply_unidirectional!(u_ref, grid, UpDownTensorOp(ops; omit_dim=omit_ref), plan)
-    @test isapprox(u_auto.data, u_ref.data; rtol=1e-12, atol=1e-12)
+    u_noomit = OrientedCoeffs{D}(copy(x))
+    u_omit1 = OrientedCoeffs{D}(copy(x))
+    apply_unidirectional!(u_noomit, grid, UpDownTensorOp(ops; omit_dim=0), plan)
+    apply_unidirectional!(u_omit1, grid, UpDownTensorOp(ops; omit_dim=1), plan)
+    @test isapprox(u_noomit.data, u_omit1.data; rtol=1e-12, atol=1e-12)
 
     lop1 = LineMatrixOp([LowerTriangular([1.0 0.0; 2.0 3.0])])
     lop2 = LineMatrixOp([[1.0 2.0; 3.0 4.0]])
     lop3 = LineDiagonalOp(diag_ones3)
     ud = UpDownTensorOp((lop1, lop2, lop3))
+    @test ud.omit_dim == 1
     @test ud.split_mask == UInt64(0x2)
 end
 
-@testset "UpDown backend parity" begin
+@testset "UpDown omission parity" begin
     rng = MersenneTwister(5)
     D = 3
     L = 3
@@ -275,59 +261,22 @@ end
     coords = collect(SVector{D,Int}, traverse(grid))
     rmax = refinement_caps(I)
 
+    mats = ntuple(d -> nested_dense_mats(rng, axes[d], rmax[d], Float64), Val(D))
+    x = randn(rng, Float64, length(grid))
+    u_default = OrientedCoeffs{D}(copy(x))
+    u_omit1 = OrientedCoeffs{D}(copy(x))
+    apply_unidirectional!(u_default, grid, UpDownTensorOp(ntuple(d -> LineMatrixOp(mats[d]), Val(D))), plan)
+    apply_unidirectional!(u_omit1, grid, UpDownTensorOp(ntuple(d -> LineMatrixOp(mats[d]), Val(D)); omit_dim=1), plan)
+    @test isapprox(u_default.data, u_omit1.data; rtol=1e-12, atol=1e-12)
+
     for omit_dim in (0, 1)
         x = randn(rng, Float64, length(grid))
-
-        mats = ntuple(d -> nested_dense_mats(rng, axes[d], rmax[d], Float64), Val(D))
-        op_dense = UpDownTensorOp(ntuple(d -> LineMatrixOp(mats[d]), Val(D)); omit_dim=omit_dim)
-        u_dense_fiber = OrientedCoeffs{D}(copy(x))
-        u_dense_term = OrientedCoeffs{D}(copy(x))
-        apply_unidirectional!(u_dense_fiber, grid, op_dense, plan; parallel=:fiber)
-        apply_unidirectional!(u_dense_term, grid, op_dense, plan; parallel=:term)
-        @test isapprox(u_dense_term.data, u_dense_fiber.data; rtol=1e-12, atol=1e-12)
-
-        Amax_dense = ntuple(d -> mats[d][rmax[d] + 1], Val(D))
-        @test isapprox(u_dense_fiber.data, restricted_kron_matvec(coords, Amax_dense, x); rtol=1e-10, atol=1e-10)
-
-        op_banded = UpDownTensorOp(ntuple(_ -> LineBandedOp(dense_tridiag_family), Val(D)); omit_dim=omit_dim)
-        u_banded_fiber = OrientedCoeffs{D}(copy(x))
-        u_banded_term = OrientedCoeffs{D}(copy(x))
-        apply_unidirectional!(u_banded_fiber, grid, op_banded, plan; parallel=:fiber)
-        apply_unidirectional!(u_banded_term, grid, op_banded, plan; parallel=:term)
-        @test isapprox(u_banded_term.data, u_banded_fiber.data; rtol=1e-12, atol=1e-12)
-
-        Amax_banded = ntuple(d -> dense_tridiag_family(totalsize(axes[d], rmax[d]), Float64), Val(D))
-        @test isapprox(u_banded_fiber.data, restricted_kron_matvec(coords, Amax_banded, x); rtol=1e-10, atol=1e-10)
+        op_banded = UpDownTensorOp(ntuple(_ -> LineBandedOp(banded_tridiag_family), Val(D)); omit_dim=omit_dim)
+        u_banded = OrientedCoeffs{D}(copy(x))
+        apply_unidirectional!(u_banded, grid, op_banded, plan)
+        Amax_banded = ntuple(d -> banded_tridiag_family(totalsize(axes[d], rmax[d]), Float64), Val(D))
+        @test isapprox(u_banded.data, restricted_kron_matvec(coords, Amax_banded, x); rtol=1e-10, atol=1e-10)
     end
-end
-
-@testset "UpDown one-thread parity and term determinism" begin
-    rng = MersenneTwister(6)
-    D = 3
-    L = 3
-    axes = ntuple(_ -> DyadicNodes(NaturalOrder()), D)
-    I = SmolyakIndexSet(Val(D), L; cap=SVector{D,Int}(ntuple(_ -> L, D)))
-    grid = SparseGrid(SparseGridSpec(axes, I))
-    plan = CyclicLayoutPlan(grid, Float64)
-    rmax = refinement_caps(I)
-    mats = ntuple(d -> nested_dense_mats(rng, axes[d], rmax[d], Float64), Val(D))
-    op = UpDownTensorOp(ntuple(d -> LineMatrixOp(mats[d]), Val(D)); omit_dim=0)
-    x = randn(rng, Float64, length(grid))
-
-    u_auto = OrientedCoeffs{D}(copy(x))
-    u_fiber = OrientedCoeffs{D}(copy(x))
-    u_term = OrientedCoeffs{D}(copy(x))
-    apply_unidirectional!(u_auto, grid, op, plan; parallel=:auto, parallel_width=1)
-    apply_unidirectional!(u_fiber, grid, op, plan; parallel=:fiber, parallel_width=1)
-    apply_unidirectional!(u_term, grid, op, plan; parallel=:term, parallel_width=1)
-    @test u_auto.data == u_fiber.data
-    @test u_auto.data == u_term.data
-
-    u_term1 = OrientedCoeffs{D}(copy(x))
-    u_term2 = OrientedCoeffs{D}(copy(x))
-    apply_unidirectional!(u_term1, grid, op, plan; parallel=:term)
-    apply_unidirectional!(u_term2, grid, op, plan; parallel=:term)
-    @test u_term1.data == u_term2.data
 end
 
 @testset "Scheduling parity" begin

@@ -98,17 +98,17 @@ end
 # -----------------------------------------------------------------------------
 # Dirichlet Legendre mass/stiffness operators (CH2) + matrix-free matvec
 
-"""1D mass matrix in the Dirichlet Legendre basis ϕₖ = Lₖ − Lₖ₊₂.
+"""1D mass matrix in the Dirichlet Legendre basis ϕₖ = Lₖ - Lₖ₊₂.
 
-This is a matrix family function compatible with `LineBandedOp`:
+This is a banded family function compatible with `LineBandedOp`:
 
     A = legendre_dirichlet_mass_matrix(n, T)
 """
 function legendre_dirichlet_mass_matrix(n::Integer, ::Type{T}) where {T<:Number}
     n = Int(n)
-    n <= 0 && return BandedMatrices.BandedMatrix{T}(undef, (0, 0), (0, 0))
+    n <= 0 && return BandedMatrix{T}(undef, (0, 0), (0, 0))
 
-    A = BandedMatrices.BandedMatrix{T}(undef, (n, n), (2, 2))
+    A = BandedMatrix{T}(undef, (n, n), (2, 2))
     fill!(A, zero(T))
 
     @inbounds for i in 1:n
